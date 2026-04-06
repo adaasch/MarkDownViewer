@@ -131,6 +131,7 @@ jobs:
             chmod +x "$bundle_dir/${BINARY_NAME}"
             tar -C dist -czf "dist/${BINARY_NAME}-${version}-${platform}.tar.gz" "$(basename "$bundle_dir")"
           fi
+          rm -rf "$bundle_dir"
 
       - name: Build Linux distro packages
         if: runner.os == 'Linux'
