@@ -1,0 +1,67 @@
+[package]
+name = "mdview"
+version = "0.1.0"
+edition = "2021"
+description = "A simple, fast and lightweight Markdown viewer"
+license = "GPL-3.0-only"
+authors = ["Andy"]
+readme = "README.md"
+
+[dependencies]
+eframe = "0.31"
+egui_extras = { version = "0.31", features = ["image"] }
+pulldown-cmark = { version = "0.12", features = ["simd"] }
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+notify = "7"
+notify-debouncer-mini = "0.5"
+clap = { version = "4", features = ["derive"] }
+open = "5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+log = "0.4"
+env_logger = "0.11"
+rfd = "0.15"
+
+[dev-dependencies]
+tempfile = "3"
+
+[package.metadata.deb]
+name = "mdview"
+section = "utils"
+priority = "optional"
+depends = "$auto"
+maintainer-scripts = "packaging/linux/deb-scripts"
+assets = [
+    ["target/release/mdview", "usr/bin/mdview", "755"],
+    ["README.md", "usr/share/doc/mdview/README.md", "644"],
+    ["LICENSE", "usr/share/doc/mdview/LICENSE", "644"],
+    ["packaging/linux/mdview.desktop", "usr/share/applications/mdview.desktop", "644"],
+    ["assets/app-icon.png", "usr/share/pixmaps/mdview.png", "644"],
+    ["packaging/linux/mdview.xml", "usr/share/mime/packages/mdview.xml", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "mdview"
+post_install_script = """
+if command -v update-mime-database >/dev/null 2>&1; then
+  update-mime-database /usr/share/mime >/dev/null 2>&1 || true
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+fi
+"""
+post_uninstall_script = """
+if command -v update-mime-database >/dev/null 2>&1; then
+  update-mime-database /usr/share/mime >/dev/null 2>&1 || true
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+fi
+"""
+assets = [
+    { source = "target/release/mdview", dest = "/usr/bin/mdview", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/mdview/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/mdview/LICENSE", mode = "644", doc = true },
+    { source = "packaging/linux/mdview.desktop", dest = "/usr/share/applications/mdview.desktop", mode = "644" },
+    { source = "assets/app-icon.png", dest = "/usr/share/pixmaps/mdview.png", mode = "644" },
+    { source = "packaging/linux/mdview.xml", dest = "/usr/share/mime/packages/mdview.xml", mode = "644" },
+]

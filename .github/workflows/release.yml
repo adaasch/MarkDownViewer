@@ -1,0 +1,202 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and publish, for example v0.1.0"
+        required: true
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  BINARY_NAME: mdview
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libglib2.0-dev \
+            libgdk-pixbuf-2.0-dev \
+            libpango1.0-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --locked
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target_name: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: windows-2022
+            target_name: x86_64-pc-windows-msvc
+            archive_ext: zip
+          - os: macos-13
+            target_name: x86_64-apple-darwin
+            archive_ext: tar.gz
+          - os: macos-14
+            target_name: aarch64-apple-darwin
+            archive_ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libglib2.0-dev \
+            libgdk-pixbuf-2.0-dev \
+            libpango1.0-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            rpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Determine release version
+        id: version
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package release artifacts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          version="${{ steps.version.outputs.version }}"
+          platform="${{ matrix.target_name }}"
+          bundle_dir="dist/${BINARY_NAME}-${version}-${platform}"
+          mkdir -p "$bundle_dir"
+
+          cp README.md LICENSE "$bundle_dir"/
+
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp "target/release/${BINARY_NAME}.exe" "$bundle_dir"/
+            7z a "dist/${BINARY_NAME}-${version}-${platform}.zip" "${bundle_dir}"/*
+          else
+            cp "target/release/${BINARY_NAME}" "$bundle_dir"/
+            chmod +x "$bundle_dir/${BINARY_NAME}"
+            tar -C dist -czf "dist/${BINARY_NAME}-${version}-${platform}.tar.gz" "$(basename "$bundle_dir")"
+          fi
+
+      - name: Build Linux distro packages
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          version="${{ steps.version.outputs.version }}"
+          cargo install cargo-deb cargo-generate-rpm --locked
+          cargo deb --no-build --output "dist/${BINARY_NAME}_${version}_amd64.deb"
+          cargo generate-rpm
+          rpm_path="$(find target -type f -name '*.rpm' | head -n 1)"
+          cp "$rpm_path" "dist/$(basename "$rpm_path")"
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target_name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-artifacts
+
+      - name: Determine release metadata
+        id: release
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd release-artifacts
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          tag="${{ steps.release.outputs.tag }}"
+          prerelease_flag=""
+          if [[ "${{ inputs.prerelease }}" == "true" ]]; then
+            prerelease_flag="--prerelease"
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release-artifacts/* --clobber
+          else
+            gh release create "$tag" release-artifacts/* \
+              --title "$tag" \
+              --generate-notes \
+              $prerelease_flag
+          fi
