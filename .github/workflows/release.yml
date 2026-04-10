@@ -4,11 +4,13 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - copilot/fix-release-pipeline-issue
   workflow_dispatch:
     inputs:
       tag:
         description: "Release tag to build and publish, for example v0.1.0"
-        required: true
+        required: false
       prerelease:
         description: "Mark the GitHub Release as a prerelease"
         required: false
@@ -28,7 +30,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag || github.sha }}
 
       - name: Install Linux build dependencies
         run: |
@@ -74,7 +76,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag || github.sha }}
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -102,8 +104,11 @@ jobs:
         run: |
           if [[ -n "${{ inputs.tag }}" ]]; then
             tag="${{ inputs.tag }}"
-          else
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
             tag="${GITHUB_REF_NAME}"
+          else
+            version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= "//; s/"//')
+            tag="v${version}"
           fi
           version="${tag#v}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -156,6 +161,11 @@ jobs:
     needs: build
     runs-on: ubuntu-22.04
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v6
         with:
@@ -169,8 +179,11 @@ jobs:
         run: |
           if [[ -n "${{ inputs.tag }}" ]]; then
             tag="${{ inputs.tag }}"
-          else
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
             tag="${GITHUB_REF_NAME}"
+          else
+            version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= "//; s/"//')
+            tag="v${version}"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
@@ -199,5 +212,6 @@ jobs:
             gh release create "$tag" release-artifacts/* \
               --title "$tag" \
               --generate-notes \
+              --target "${{ github.sha }}" \
               $prerelease_flag
           fi
