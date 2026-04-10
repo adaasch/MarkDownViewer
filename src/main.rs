@@ -59,6 +59,9 @@ fn configure_fonts(ctx: &eframe::egui::Context) {
     }
 
     ctx.set_fonts(fonts);
+    ctx.options_mut(|options| {
+        options.line_scroll_speed = 72.0;
+    });
 }
 
 #[derive(Parser)]

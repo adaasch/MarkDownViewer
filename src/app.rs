@@ -286,6 +286,10 @@ impl eframe::App for MdViewApp {
                         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
                         ui.add_space(8.0);
                         ui.label("A simple, fast markdown viewer");
+                        ui.label("© 2026 Andreas Daasch");
+                        if ui.link("https://github.com/adaasch/MarkDownViewer").clicked() {
+                            let _ = open::that("https://github.com/adaasch/MarkDownViewer");
+                        }
                         ui.label("License: GPL-3.0");
                         ui.add_space(8.0);
                         ui.label("Keyboard Shortcuts:");
