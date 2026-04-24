@@ -1,10 +1,11 @@
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+use notify_debouncer_mini::notify::{self, RecommendedWatcher};
+use notify_debouncer_mini::{DebounceEventResult, DebouncedEventKind, new_debouncer};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
 pub struct FileWatcher {
-    _debouncer: notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>,
+    _debouncer: notify_debouncer_mini::Debouncer<RecommendedWatcher>,
     receiver: mpsc::Receiver<PathBuf>,
 }
 
@@ -13,20 +14,25 @@ impl FileWatcher {
         let (tx, rx) = mpsc::channel();
         let sender = tx.clone();
 
-        let mut debouncer = new_debouncer(Duration::from_millis(200), move |res: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>| {
-            if let Ok(events) = res {
-                for event in events {
-                    if event.kind == DebouncedEventKind::Any {
-                        let _ = sender.send(event.path);
+        let mut debouncer = new_debouncer(
+            Duration::from_millis(200),
+            move |res: DebounceEventResult| {
+                if let Ok(events) = res {
+                    for event in events {
+                        if event.kind == DebouncedEventKind::Any {
+                            let _ = sender.send(event.path);
+                        }
                     }
                 }
-            }
-        })?;
+            },
+        )?;
 
         // IMPORTANT: Must `use notify::Watcher;` for the `.watch()` trait method to be available
         #[allow(unused_imports)]
         use notify::Watcher;
-        debouncer.watcher().watch(path, notify::RecursiveMode::NonRecursive)?;
+        debouncer
+            .watcher()
+            .watch(path, notify::RecursiveMode::NonRecursive)?;
 
         Ok(Self {
             _debouncer: debouncer,

@@ -1,6 +1,6 @@
 # MarkDownViewer (mdview)
 
-A simple, fast and lightweight Markdown viewer written in Rust.
+A simple, fast and lightweight standalone Markdown Viewer written in Rust.
 
 ## Features
 

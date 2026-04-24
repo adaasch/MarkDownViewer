@@ -8,6 +8,9 @@ use crate::links::{classify_link, heading_to_anchor, LinkAction};
 use crate::parser::{InlineElement, ListItem, MdElement};
 use crate::theme::Theme;
 
+const MIN_TABLE_COL_PX: f32 = 40.0;
+const TABLE_CELL_PADDING_PX: f32 = 6.0;
+
 #[derive(Clone, Debug, Default)]
 struct InlineStyleState {
     bold: bool,
@@ -175,25 +178,213 @@ impl MdRenderer {
         base_dir: &Path,
         actions: &mut Vec<RenderAction>,
     ) {
-        let _num_cols = headers.len().max(1);
-        let _available = ui.available_width();
+        let num_cols = headers.len().max(1);
+        let spacing_x = 8.0f32;
+        let row_pad_y = 3.0f32;
+        // Frame inner_margin (left + right) + safety buffer so the table never
+        // pushes the page past ui.available_width() — otherwise the outer
+        // ScrollArea adds a horizontal scrollbar for a couple of stray pixels.
+        const TABLE_WIDTH_SAFETY_PX: f32 = 8.0;
 
-        egui::Grid::new(ui.next_auto_id())
-            .striped(true)
-            .min_col_width(40.0)
-            .spacing([8.0, 4.0])
+        let total_spacing = (num_cols.saturating_sub(1) as f32) * spacing_x;
+        let available = (ui.available_width() - total_spacing - TABLE_WIDTH_SAFETY_PX).max(0.0);
+
+        // Measure text widths using the actual font so min/max widths match
+        // what will be rendered — char-count × glyph_width('x') underestimates
+        // wider letters and causes single-word headers to wrap.
+        let font_id = FontId::new(14.0, FontFamily::Proportional);
+        let col_widths = ui.fonts_mut(|fonts| {
+            let measure = |s: &str| -> f32 {
+                if s.is_empty() {
+                    0.0
+                } else {
+                    fonts
+                        .layout_no_wrap(s.to_string(), font_id.clone(), Color32::WHITE)
+                        .size()
+                        .x
+                }
+            };
+            Self::compute_column_widths(headers, rows, available, measure)
+        });
+
+        let stripe_color = theme.table_stripe_bg();
+        let border_color = theme.table_border();
+
+        // Header row — no stripe, bold text
+        self.render_table_row(
+            ui,
+            headers,
+            &col_widths,
+            spacing_x,
+            row_pad_y,
+            Color32::TRANSPARENT,
+            true,
+            theme,
+            base_dir,
+            actions,
+        );
+
+        // Separator line under header
+        let sep_stroke = Stroke::new(1.0, border_color);
+        let sep_rect = ui.available_rect_before_wrap();
+        let table_width: f32 = col_widths.iter().sum::<f32>() + total_spacing;
+        ui.painter().hline(
+            sep_rect.min.x..=sep_rect.min.x + table_width,
+            sep_rect.min.y,
+            sep_stroke,
+        );
+        ui.add_space(1.0);
+
+        // Body rows — alternating stripe background
+        for (row_idx, row) in rows.iter().enumerate() {
+            let fill = if row_idx % 2 == 0 {
+                stripe_color
+            } else {
+                Color32::TRANSPARENT
+            };
+            self.render_table_row(
+                ui,
+                row,
+                &col_widths,
+                spacing_x,
+                row_pad_y,
+                fill,
+                false,
+                theme,
+                base_dir,
+                actions,
+            );
+        }
+    }
+
+    /// Render one table row with the given column widths and background fill.
+    /// Cells are top-aligned so the row's height equals the tallest cell and
+    /// the background covers the full row.
+    #[allow(clippy::too_many_arguments)]
+    fn render_table_row(
+        &mut self,
+        ui: &mut Ui,
+        cells: &[Vec<InlineElement>],
+        col_widths: &[f32],
+        spacing_x: f32,
+        row_pad_y: f32,
+        fill: Color32,
+        bold: bool,
+        theme: &Theme,
+        base_dir: &Path,
+        actions: &mut Vec<RenderAction>,
+    ) {
+        Frame::new()
+            .fill(fill)
+            .inner_margin(Margin {
+                left: 2,
+                right: 2,
+                top: row_pad_y as i8,
+                bottom: row_pad_y as i8,
+            })
             .show(ui, |ui| {
-                for cell in headers {
-                    self.render_inline_sequence(ui, cell, theme, base_dir, actions, None, true);
-                }
-                ui.end_row();
-                for row in rows {
-                    for cell in row {
-                        self.render_inline_sequence(ui, cell, theme, base_dir, actions, None, false);
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = spacing_x;
+                    for (i, cell) in cells.iter().enumerate() {
+                        let width = col_widths.get(i).copied().unwrap_or(MIN_TABLE_COL_PX);
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(width, 0.0),
+                            egui::Layout::top_down(egui::Align::LEFT),
+                            |ui| {
+                                ui.set_max_width(width);
+                                ui.set_min_width(width);
+                                self.render_inline_sequence_wrapped(
+                                    ui, cell, theme, base_dir, actions, None, bold,
+                                    Some(width),
+                                );
+                            },
+                        );
                     }
-                    ui.end_row();
-                }
+                });
             });
+    }
+
+    /// Compute per-column widths using a CSS `table-layout: auto`-style algorithm.
+    ///
+    /// For each column we estimate a minimum width (longest unbreakable word)
+    /// and a preferred width (widest full line). If the preferred widths sum
+    /// to at most `available`, they are used as-is. Otherwise the available
+    /// space is distributed between min and preferred in proportion to each
+    /// column's slack (max − min). If even the minimums don't fit, columns
+    /// fall back to their minimum widths — the table is allowed to exceed the
+    /// available width rather than squash words mid-letter.
+    fn compute_column_widths<M: FnMut(&str) -> f32>(
+        headers: &[Vec<InlineElement>],
+        rows: &[Vec<Vec<InlineElement>>],
+        available: f32,
+        mut measure: M,
+    ) -> Vec<f32> {
+        let num_cols = headers.len().max(1);
+
+        let mut min_w = vec![0.0f32; num_cols];
+        let mut max_w = vec![0.0f32; num_cols];
+
+        let mut measure_cell = |cell: &[InlineElement]| -> (f32, f32) {
+            let text = Self::extract_text(cell);
+            // max: widest single line (assuming no wrap)
+            let mut max_px = 0.0f32;
+            for line in text.lines() {
+                max_px = max_px.max(measure(line));
+            }
+            // min: widest unbreakable word
+            let mut min_px = 0.0f32;
+            for word in text.split_whitespace() {
+                min_px = min_px.max(measure(word));
+            }
+            max_px += TABLE_CELL_PADDING_PX;
+            min_px += TABLE_CELL_PADDING_PX;
+            (
+                min_px.max(MIN_TABLE_COL_PX),
+                max_px.max(min_px).max(MIN_TABLE_COL_PX),
+            )
+        };
+
+        for (i, h) in headers.iter().enumerate().take(num_cols) {
+            let (mn, mx) = measure_cell(h);
+            min_w[i] = min_w[i].max(mn);
+            max_w[i] = max_w[i].max(mx);
+        }
+        for row in rows {
+            for (i, cell) in row.iter().enumerate().take(num_cols) {
+                let (mn, mx) = measure_cell(cell);
+                min_w[i] = min_w[i].max(mn);
+                max_w[i] = max_w[i].max(mx);
+            }
+        }
+        for i in 0..num_cols {
+            if min_w[i] < MIN_TABLE_COL_PX {
+                min_w[i] = MIN_TABLE_COL_PX;
+            }
+            if max_w[i] < min_w[i] {
+                max_w[i] = min_w[i];
+            }
+        }
+
+        let sum_max: f32 = max_w.iter().sum();
+        let sum_min: f32 = min_w.iter().sum();
+
+        if sum_max <= available {
+            max_w
+        } else if sum_min < available {
+            let extra = available - sum_min;
+            let diff_total = sum_max - sum_min;
+            if diff_total <= f32::EPSILON {
+                min_w
+            } else {
+                min_w
+                    .iter()
+                    .zip(max_w.iter())
+                    .map(|(&mn, &mx)| mn + extra * (mx - mn) / diff_total)
+                    .collect()
+            }
+        } else {
+            min_w
+        }
     }
 
     fn render_list(
@@ -312,27 +503,72 @@ impl MdRenderer {
         font_size: Option<f32>,
         bold: bool,
     ) {
+        self.render_inline_sequence_wrapped(
+            ui,
+            inlines,
+            theme,
+            base_dir,
+            actions,
+            font_size,
+            bold,
+            None,
+        );
+    }
+
+    /// Like `render_inline_sequence` but with an explicit wrap width. When
+    /// `wrap_width` is `Some(w)` the text layout wraps at exactly `w` pixels
+    /// regardless of `ui.available_width()`; this is how table cells force a
+    /// column-specific wrap boundary. Note that `ui.label(job)` cannot be used
+    /// here because `Label` unconditionally overwrites `job.wrap.max_width`
+    /// with `ui.available_width()`; we lay out the galley ourselves and paint
+    /// it to preserve the explicit wrap width.
+    #[allow(clippy::too_many_arguments)]
+    fn render_inline_sequence_wrapped(
+        &mut self,
+        ui: &mut Ui,
+        inlines: &[InlineElement],
+        theme: &Theme,
+        base_dir: &Path,
+        actions: &mut Vec<RenderAction>,
+        font_size: Option<f32>,
+        bold: bool,
+        wrap_width: Option<f32>,
+    ) {
         if !Self::has_interactive(inlines) {
             // Fast path: pure text, build a single LayoutJob
             let mut job = LayoutJob::default();
-            job.wrap.max_width = ui.available_width();
+            job.wrap.max_width = wrap_width.unwrap_or_else(|| ui.available_width());
             job.break_on_newline = true;
             let mut style = InlineStyleState {
                 bold,
                 ..Default::default()
             };
             Self::append_inlines_to_job(&mut job, inlines, theme, font_size, &mut style);
-            if !job.text.is_empty() {
+            if job.text.is_empty() {
+                return;
+            }
+            if wrap_width.is_some() {
+                // Paint galley directly so our explicit wrap width is honored.
+                let galley = ui.fonts_mut(|f| f.layout_job(job));
+                let (rect, _resp) =
+                    ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+                ui.painter()
+                    .galley(rect.min, galley, theme.text_color());
+            } else {
                 ui.label(job);
             }
         } else {
             // Mixed path: text + interactive elements
-            self.render_mixed_inlines(ui, inlines, theme, base_dir, actions, font_size, bold, false, false);
+            self.render_mixed_inlines(
+                ui, inlines, theme, base_dir, actions, font_size, bold, false, false,
+                wrap_width,
+            );
         }
     }
 
     /// Render inline sequence that contains links or images.
     /// Accumulates text into LayoutJob, flushes before interactive elements.
+    #[allow(clippy::too_many_arguments)]
     fn render_mixed_inlines(
         &mut self,
         ui: &mut Ui,
@@ -344,12 +580,17 @@ impl MdRenderer {
         bold: bool,
         italic: bool,
         strikethrough: bool,
+        wrap_width: Option<f32>,
     ) {
+        let explicit_width = wrap_width;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
+            if let Some(w) = explicit_width {
+                ui.set_max_width(w);
+            }
 
             let mut job = LayoutJob::default();
-            job.wrap.max_width = ui.available_width();
+            job.wrap.max_width = explicit_width.unwrap_or_else(|| ui.available_width());
             job.break_on_newline = true;
 
             for inline in inlines {
@@ -1065,5 +1306,105 @@ mod tests {
     fn test_has_interactive_with_html() {
         let inlines = vec![InlineElement::Html("<b>text</b>".to_string())];
         assert!(!MdRenderer::has_interactive(&inlines));
+    }
+
+    // --- compute_column_widths tests ---
+
+    fn txt(s: &str) -> Vec<InlineElement> {
+        vec![InlineElement::Text(s.to_string())]
+    }
+
+    /// Deterministic test measure function: 7px per char. Matches the old
+    /// behavior so the numeric expectations in existing tests still hold.
+    fn test_measure(s: &str) -> f32 {
+        s.chars().count() as f32 * 7.0
+    }
+
+    #[test]
+    fn test_compute_column_widths_fits_uses_preferred() {
+        let headers = vec![txt("A"), txt("B")];
+        let rows = vec![vec![txt("x"), txt("y")]];
+        let widths = MdRenderer::compute_column_widths(&headers, &rows, 1000.0, test_measure);
+        assert_eq!(widths.len(), 2);
+        // Each column fits naturally — widths bounded by min col px (40) at minimum
+        for w in &widths {
+            assert!(*w >= MIN_TABLE_COL_PX - 0.01);
+        }
+        // Total well below available
+        let total: f32 = widths.iter().sum();
+        assert!(total < 1000.0);
+    }
+
+    #[test]
+    fn test_compute_column_widths_squeezed_interpolates() {
+        // Column 2 has much longer content than column 1
+        let headers = vec![txt("Short"), txt("Header")];
+        let long_line = "word ".repeat(40); // ~200 chars, widest line
+        let rows = vec![vec![txt("a"), txt(&long_line)]];
+        let available = 400.0;
+        let widths = MdRenderer::compute_column_widths(&headers, &rows, available, test_measure);
+        assert_eq!(widths.len(), 2);
+        let total: f32 = widths.iter().sum();
+        // Should fit within available (minimums fit since "word" is only 4 chars)
+        assert!(total <= available + 0.5, "total {} should be ≤ available {}", total, available);
+        // The long column should be wider than the short one
+        assert!(widths[1] > widths[0]);
+    }
+
+    #[test]
+    fn test_compute_column_widths_overflow_on_huge_unbreakable_word() {
+        // A column contains a single word longer than the available width
+        let huge = "a".repeat(200);
+        let headers = vec![txt(&huge)];
+        let rows: Vec<Vec<Vec<InlineElement>>> = vec![];
+        let available = 100.0;
+        let widths = MdRenderer::compute_column_widths(&headers, &rows, available, test_measure);
+        assert_eq!(widths.len(), 1);
+        // Min width is the longest word ≈ 200 * 7 = 1400px, which exceeds 100.
+        // Expected: table overflows; column uses min width.
+        assert!(widths[0] > available, "expected overflow: width {} should exceed available {}", widths[0], available);
+    }
+
+    #[test]
+    fn test_compute_column_widths_empty_cells_get_minimum() {
+        let headers = vec![txt(""), txt("")];
+        let rows: Vec<Vec<Vec<InlineElement>>> = vec![];
+        let widths = MdRenderer::compute_column_widths(&headers, &rows, 1000.0, test_measure);
+        assert_eq!(widths.len(), 2);
+        for w in &widths {
+            assert!(*w >= MIN_TABLE_COL_PX - 0.01);
+        }
+    }
+
+    #[test]
+    fn test_compute_column_widths_preserves_column_count() {
+        let headers = vec![txt("A"), txt("B"), txt("C")];
+        let rows = vec![
+            vec![txt("1"), txt("2"), txt("3")],
+            vec![txt("4"), txt("5"), txt("6")],
+        ];
+        let widths = MdRenderer::compute_column_widths(&headers, &rows, 500.0, test_measure);
+        assert_eq!(widths.len(), 3);
+    }
+
+    #[test]
+    fn test_compute_column_widths_handles_single_column() {
+        let headers = vec![txt("Only")];
+        let rows = vec![vec![txt("cell")]];
+        let widths = MdRenderer::compute_column_widths(&headers, &rows, 300.0, test_measure);
+        assert_eq!(widths.len(), 1);
+        assert!(widths[0] >= MIN_TABLE_COL_PX);
+    }
+
+    #[test]
+    fn test_compute_column_widths_interpolation_respects_minimum() {
+        // When squeezed, a column should never get less than its longest-word width.
+        let headers = vec![txt("supercalifragilistic"), txt("A")];
+        let rows = vec![vec![txt("short"), txt("x".repeat(500).as_str())]];
+        let available = 300.0;
+        let widths = MdRenderer::compute_column_widths(&headers, &rows, available, test_measure);
+        // Column 0's longest word is "supercalifragilistic" = 20 chars * 7 + padding ≈ 146
+        let col0_min = 20.0 * 7.0;
+        assert!(widths[0] >= col0_min - 10.0, "col0 width {} should be >= {}", widths[0], col0_min);
     }
 }

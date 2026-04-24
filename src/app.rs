@@ -285,7 +285,7 @@ impl eframe::App for MdViewApp {
                         ui.heading("mdview");
                         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
                         ui.add_space(8.0);
-                        ui.label("A simple, fast markdown viewer");
+                        ui.label("A simple, fast and lightweight standalone Markdown Viewer");
                         ui.label("© 2026 Andreas Daasch");
                         if ui.link("https://github.com/adaasch/MarkDownViewer").clicked() {
                             let _ = open::that("https://github.com/adaasch/MarkDownViewer");
