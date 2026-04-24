@@ -173,6 +173,22 @@ done
 | `fn()` | **strong** | *emphasis* |
 | `const x` | ***bold italic*** | ~~strikethrough~~ |
 
+### Wide Table (tests column wrapping)
+
+| Feature | Description | Notes |
+|---------|-------------|-------|
+| Column width auto-layout | Columns wrap their content when the table would otherwise exceed the viewport width, using a proportional distribution based on each column's preferred vs. minimum width. | This mirrors the CSS `table-layout: auto` algorithm used by browsers. |
+| Overflow fallback | When even the longest word in a column exceeds the available space, the table is allowed to overflow horizontally rather than truncate mid-word. | Non-table paragraphs remain bounded to the viewport regardless. |
+| Visual balance | Wider-content columns receive more space than narrow-content columns, so a long description does not force a short code column to be equally wide. | The slack between min and max width drives the weighting. |
+
+### Table with `<br>` line breaks (uneven row heights)
+
+| Field | Values | Notes |
+|-------|--------|-------|
+| Mode | 0x01: heating<br>0x02: cooling<br>0x03: venting<br>0x04: auto | Row heights should align; stripe backgrounds should cover the full row. |
+| Fan  | 0x00: auto<br>0x02: 1<br>0x06: 2<br>0x03: 3<br>0x07: 4<br>0x05: 5 | Adjacent cells have vastly different line counts. |
+| Temp | 16..31 °C | Short cell alongside tall ones. |
+
 ---
 
 ## Section 6: Blockquotes

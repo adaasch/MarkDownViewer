@@ -60,12 +60,12 @@ fn configure_fonts(ctx: &eframe::egui::Context) {
 
     ctx.set_fonts(fonts);
     ctx.options_mut(|options| {
-        options.line_scroll_speed = 72.0;
+        options.input_options.line_scroll_speed = 72.0;
     });
 }
 
 #[derive(Parser)]
-#[command(name = "mdview", version, about = "A simple, fast markdown viewer")]
+#[command(name = "mdview", version, about = "A simple, fast and lightweight standalone Markdown Viewer")]
 struct Cli {
     /// Markdown file to open (opens file picker if not provided)
     file: Option<PathBuf>,
