@@ -152,6 +152,7 @@ dependencies = [
  "ndk-context",
  "ndk-sys",
  "num_enum",
+ "simd_cesu8",
  "thiserror 2.0.18",
 ]
 
@@ -2102,11 +2103,13 @@ dependencies = [
 name = "mdview"
 version = "0.1.4"
 dependencies = [
+ "android-activity",
  "clap",
  "eframe",
  "egui_extras",
  "env_logger",
  "image",
+ "jni",
  "log",
  "notify 7.0.0",
  "notify-debouncer-mini",
@@ -2115,6 +2118,7 @@ dependencies = [
  "rfd",
  "syntect",
  "tempfile",
+ "winit",
 ]
 
 [[package]]

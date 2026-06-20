@@ -1,0 +1,16 @@
+# Gradle
+.gradle/
+build/
+/captures/
+local.properties
+
+# Native build (CMake / cargo-ndk)
+.cxx/
+
+# Generated native libraries: built by cargo-ndk into
+# app/build/intermediates/cargo-ndk-out and copied here by Gradle at build time.
+app/src/main/jniLibs/
+
+# IDE
+*.iml
+.idea/

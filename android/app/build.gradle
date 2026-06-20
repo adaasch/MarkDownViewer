@@ -1,0 +1,117 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.adaasch.mdview'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.adaasch.mdview'
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "0.1.4"
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'
+        }
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_static"
+                cppFlags "-std=c++17"
+            }
+        }
+    }
+
+    buildFeatures {
+        prefab true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/java'
+        main.jniLibs.srcDirs += 'src/main/jniLibs'
+    }
+
+    packagingOptions {
+        jniLibs {
+            // Don't strip the .so files - cargo-ndk already stripped them
+            keepDebugSymbols += '**/*.so'
+        }
+    }
+
+    signingConfigs {
+        debug {
+            // Use the default debug keystore
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
+        release {
+            signingConfig signingConfigs.debug
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+// Copy the cargo-ndk output into the jniLibs directory before the merge task.
+// We hook into the assemble task so this runs after all other tasks are
+// configured but before the APK is packaged.
+afterEvaluate {
+    def cargoNdkOut = file('build/intermediates/cargo-ndk-out')
+    def abiList = ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86']
+    def copyJniLibs = tasks.register('copyJniLibs') {
+        description = 'Copy cargo-ndk output to jniLibs directory'
+        group = 'build'
+        doLast {
+            if (cargoNdkOut.exists()) {
+                abiList.each { abi ->
+                    def src = new File(cargoNdkOut, abi + '/libmdview.so')
+                    def dst = file('src/main/jniLibs/' + abi + '/libmdview.so')
+                    if (src.exists()) {
+                        dst.parentFile.mkdirs()
+                        dst.bytes = src.bytes
+                        println "Copied ${src} -> ${dst}"
+                    } else {
+                        println "Source not found: ${src}"
+                    }
+                }
+            }
+        }
+    }
+    tasks.findByName('preReleaseBuild').dependsOn copyJniLibs
+    tasks.findByName('preDebugBuild').dependsOn copyJniLibs
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.activity:activity-ktx:1.9.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.documentfile:documentfile:1.0.1'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.2'
+    // GameActivity provides the surface and lifecycle management that
+    // android-activity (Rust) hooks into via `android_main`.
+    implementation 'androidx.games:games-activity:4.4.0'
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.22'
+}

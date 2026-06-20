@@ -8,6 +8,14 @@ license = "GPL-3.0-only"
 authors = ["Andreas Daasch"]
 readme = "README.md"
 
+[lib]
+name = "mdview"
+path = "src/lib.rs"
+# On Android we build a `cdylib` so cargo-ndk can copy the resulting
+# `libmdview.so` into the APK's `jniLibs/<abi>/` directory. On other targets
+# we keep the default `rlib` so the desktop binary can link against it.
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 eframe = "0.33"
 egui_extras = { version = "0.33", features = ["image"] }
@@ -16,11 +24,27 @@ syntect = { version = "5.3", default-features = false, features = ["default-fanc
 notify = "7"
 notify-debouncer-mini = "0.7"
 clap = { version = "4.6", features = ["derive"] }
-open = "5.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 log = "0.4"
 env_logger = "0.11"
+
+# Android-specific dependencies. The `android-game-activity` feature on
+# `eframe` pulls in `winit`'s Android backend which in turn uses
+# `android-activity`. We use the `jni` crate directly for the small set of
+# JNI calls in `android_shim.rs`.
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.33", default-features = false, features = [
+    "android-game-activity",
+    "default_fonts",
+    "glow",
+] }
+winit = "0.30"
+jni = "0.22"
+android-activity = "0.6"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.17"
+open = "5"
 
 [dev-dependencies]
 tempfile = "3"
@@ -59,7 +83,7 @@ if command -v update-desktop-database >/dev/null 2>&1; then
 fi
 """
 assets = [
-    { source = "target/release/mdview", dest = "/usr/bin/mdview", mode = "755" },
+    { source = "target/release/mdview", dest = "/usr/bin/mdview", mode = "755", doc = false },
     { source = "README.md", dest = "/usr/share/doc/mdview/README.md", mode = "644", doc = true },
     { source = "LICENSE", dest = "/usr/share/licenses/mdview/LICENSE", mode = "644", doc = true },
     { source = "packaging/linux/mdview.desktop", dest = "/usr/share/applications/mdview.desktop", mode = "644" },
