@@ -155,8 +155,141 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  build-android:
+    needs: verify
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+
+      # No GTK/xcb packages here on purpose: the Android target does not pull
+      # rfd (or anything else linking against them), and nothing in its
+      # dependency graph has a build script that needs them on the host.
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # cargo-ndk does not install these itself; without them the build
+          # fails with "target may not be installed".
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # Java must come first: sdkmanager is compiled for Java 17, and the
+      # runner's default JDK is older, so running setup-android before this
+      # fails with UnsupportedClassVersionError while accepting licenses.
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '11076708'
+          # Space-separated on one line — see the note in ci.yml. A YAML block
+          # scalar reaches sdkmanager as one argument containing newlines.
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0 ndk;26.3.11579264'
+
+      - name: Determine release version
+        id: version
+        shell: bash
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            tag="${{ inputs.tag }}"
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= "//; s/"//')
+            tag="v${version}"
+          fi
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build native libraries with cargo-ndk
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo ndk \
+            -t arm64-v8a \
+            -t armeabi-v7a \
+            -t x86_64 \
+            -t x86 \
+            -P 24 \
+            -o android/app/build/intermediates/cargo-ndk-out \
+            build --release
+
+      - name: Build APK with Gradle
+        # MDVIEW_KEYSTORE* are optional: without them the APK is debug-signed
+        # and usable for testing but not for distribution (Gradle warns).
+        env:
+          MDVIEW_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          MDVIEW_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          MDVIEW_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          MDVIEW_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${MDVIEW_KEYSTORE_BASE64:-}" ]]; then
+            echo "$MDVIEW_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            export MDVIEW_KEYSTORE="$RUNNER_TEMP/release.jks"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 secret is not set — the APK will be debug-signed and is not distributable."
+          fi
+          cd android
+          ./gradlew :app:assembleRelease
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          tools="$ANDROID_HOME/build-tools/34.0.0"
+
+          # A signature is not optional — an unsigned APK cannot be installed.
+          "$tools/apksigner" verify --print-certs "$apk"
+
+          badging=$("$tools/aapt2" dump badging "$apk")
+          echo "$badging" | grep -E "^package|native-code"
+
+          # Guard the failure mode that motivated the copyJniLibs change: an
+          # APK that installs fine and then dies on UnsatisfiedLinkError.
+          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+            echo "$badging" | grep -q "'$abi'" \
+              || { echo "::error::APK is missing native code for $abi"; exit 1; }
+          done
+
+          # The version in the APK must be the version we are releasing.
+          want="${{ steps.version.outputs.version }}"
+          got=$(echo "$badging" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+          [[ "$got" == "$want" ]] \
+            || { echo "::error::APK versionName '$got' != release version '$want'"; exit 1; }
+
+      - name: Stage APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk \
+             "dist/${BINARY_NAME}-${{ steps.version.outputs.version }}-android.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-android
+          path: dist/*
+          if-no-files-found: error
+
   publish:
-    needs: build
+    # Must wait for build-android too, otherwise the release is cut before the
+    # APK artifact exists and `download-artifact` silently publishes without it.
+    needs: [build, build-android]
     runs-on: ubuntu-22.04
     steps:
       - name: Check out repository
@@ -200,10 +333,17 @@ jobs:
           set -euxo pipefail
           tag="${{ steps.release.outputs.tag }}"
           prerelease_flag=""
-          if [[ "${{ inputs.prerelease }}" == "true" ]]; then
+          # The `prerelease` input only exists on workflow_dispatch, so a plain
+          # tag push always produced a full release no matter what. Also honour
+          # the semver convention: anything with a pre-release suffix
+          # (v1.2.3-rc1, -beta, -alpha) is not a final release.
+          if [[ "${{ inputs.prerelease }}" == "true" || "$tag" == *-* ]]; then
             prerelease_flag="--prerelease"
           fi
 
+          # An existing release is left as-is apart from its artifacts — this is
+          # how a release can be pre-created with the exact notes and
+          # prerelease flag wanted, then filled in by this job.
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" release-artifacts/* --clobber
           else

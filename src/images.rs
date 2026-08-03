@@ -33,7 +33,7 @@ impl ImageCache {
         path: &Path,
         ctx: &egui::Context,
     ) -> Option<egui::TextureHandle> {
-        let data = std::fs::read(path).ok()?;
+        let data = read_image_bytes(path)?;
         let image = image::load_from_memory(&data).ok()?;
         let rgba = image.to_rgba8();
         let size = [rgba.width() as usize, rgba.height() as usize];
@@ -50,6 +50,23 @@ impl ImageCache {
     pub fn clear(&mut self) {
         self.textures.clear();
     }
+}
+
+/// Read an image's raw bytes.
+///
+/// On Android an image referenced from a markdown file that was opened through
+/// the Storage Access Framework is not reachable with `std::fs` — the path is
+/// relative to a granted folder tree, not to the filesystem. It has to be
+/// resolved exactly like the markdown file that references it, otherwise every
+/// image in the document renders as its `[Image: alt]` placeholder.
+#[cfg(target_os = "android")]
+fn read_image_bytes(path: &Path) -> Option<Vec<u8>> {
+    crate::android_io::read_bytes(path).ok()
+}
+
+#[cfg(not(target_os = "android"))]
+fn read_image_bytes(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
 }
 
 #[cfg(test)]

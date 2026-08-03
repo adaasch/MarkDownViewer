@@ -1,0 +1,184 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// Single source of truth for the app version: the Rust crate's Cargo.toml.
+// Hardcoding it here meant the APK kept claiming 0.1.4 after every crate bump.
+def cargoVersion = {
+    def matcher = file('../../Cargo.toml').text =~ /(?m)^version\s*=\s*"([^"]+)"/
+    if (!matcher) {
+        throw new GradleException('Could not read version from ../../Cargo.toml')
+    }
+    matcher[0][1]
+}()
+
+// The ABIs this build targets. Single source of truth: both `abiFilters` (what
+// gets packaged) and `copyJniLibs` (what must exist) read it, so the two can
+// never disagree and demand a library the build was never asked to produce.
+//
+// Override for a fast single-ABI build — a CI compile check or a local run on
+// one device — matching the `cargo ndk -t` flags used to build the libraries:
+//     ./gradlew :app:assembleDebug -Pmdview.abis=arm64-v8a
+def targetAbis = (project.findProperty('mdview.abis')
+        ?: 'arm64-v8a,armeabi-v7a,x86_64,x86')
+    .split(',')*.trim()
+    .findAll { it }
+
+// versionCode must increase monotonically for Play/`adb install -r` upgrades.
+// MAJOR*10000 + MINOR*100 + PATCH keeps that true for any 0-99 component.
+def cargoVersionCode = {
+    def parts = cargoVersion.split(/[.\-+]/)
+    parts[0].toInteger() * 10000 + parts[1].toInteger() * 100 + parts[2].toInteger()
+}()
+
+android {
+    namespace 'eu.io_com.mdview'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'eu.io_com.mdview'
+        minSdk 24
+        targetSdk 34
+        versionCode cargoVersionCode
+        versionName cargoVersion
+        ndk {
+            abiFilters.clear()
+            abiFilters.addAll(targetAbis)
+        }
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_static"
+                cppFlags "-std=c++17"
+            }
+        }
+    }
+
+    buildFeatures {
+        prefab true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/java'
+        main.jniLibs.srcDirs += 'src/main/jniLibs'
+    }
+
+    packagingOptions {
+        jniLibs {
+            // Don't strip the .so files - cargo-ndk already stripped them
+            keepDebugSymbols += '**/*.so'
+        }
+    }
+
+    signingConfigs {
+        debug {
+            // Use the default debug keystore
+        }
+        release {
+            // Populated from the environment so the signing key never lives in
+            // the repository. CI supplies these from repository secrets; a
+            // developer can export them to build a locally-signed APK.
+            def storePath = System.getenv('MDVIEW_KEYSTORE')
+            if (storePath) {
+                storeFile file(storePath)
+                storePassword System.getenv('MDVIEW_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('MDVIEW_KEY_ALIAS')
+                keyPassword System.getenv('MDVIEW_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
+        release {
+            // The debug keystore is generated per machine, so signing a
+            // *release* with it gives every CI run a different signing
+            // identity — and Android refuses to upgrade an installed app whose
+            // signature changed. Use the real key whenever one is configured
+            // and shout loudly when there isn't one.
+            if (System.getenv('MDVIEW_KEYSTORE')) {
+                signingConfig signingConfigs.release
+            } else {
+                signingConfig signingConfigs.debug
+                logger.warn(
+                    'WARNING: MDVIEW_KEYSTORE is not set — signing the release APK ' +
+                    'with the debug key. This APK is for local testing only: it ' +
+                    'cannot be published, and users cannot upgrade to or from it.'
+                )
+            }
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+// Copy the cargo-ndk output into the jniLibs directory before the merge task.
+// We hook into the assemble task so this runs after all other tasks are
+// configured but before the APK is packaged.
+afterEvaluate {
+    def cargoNdkOut = file('build/intermediates/cargo-ndk-out')
+    def abiList = targetAbis
+    def copyJniLibs = tasks.register('copyJniLibs') {
+        description = 'Copy cargo-ndk output to jniLibs directory'
+        group = 'build'
+        doLast {
+            def missing = []
+            abiList.each { abi ->
+                def src = new File(cargoNdkOut, abi + '/libmdview.so')
+                def dst = file('src/main/jniLibs/' + abi + '/libmdview.so')
+                if (src.exists()) {
+                    dst.parentFile.mkdirs()
+                    dst.bytes = src.bytes
+                    println "Copied ${src} -> ${dst}"
+                } else {
+                    missing << abi
+                }
+            }
+            // Fail rather than package an APK with no native code in it. This
+            // used to only print "Source not found" and carry on, producing an
+            // APK that installs happily and then dies on launch with
+            // UnsatisfiedLinkError.
+            if (missing) {
+                throw new GradleException(
+                    "No libmdview.so for ABI(s): ${missing.join(', ')} under ${cargoNdkOut}.\n" +
+                    "Build the native libraries before Gradle:\n" +
+                    "  cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86 -P 24 \\\n" +
+                    "      -o android/app/build/intermediates/cargo-ndk-out build --release"
+                )
+            }
+        }
+    }
+    tasks.findByName('preReleaseBuild')?.dependsOn copyJniLibs
+    tasks.findByName('preDebugBuild')?.dependsOn copyJniLibs
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.activity:activity-ktx:1.9.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.documentfile:documentfile:1.0.1'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.2'
+    // GameActivity provides the surface and lifecycle management that
+    // android-activity (Rust) hooks into via `android_main`.
+    implementation 'androidx.games:games-activity:4.4.0'
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.22'
+}

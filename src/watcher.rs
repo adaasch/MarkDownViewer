@@ -1,14 +1,29 @@
+//! Live-reload watcher for the open document.
+//!
+//! Android has no implementation: `notify` watches via inotify, which does not
+//! work on the SAF-backed storage every Android document lives on, and the app
+//! addresses documents by content URI rather than by a watchable path. Rather
+//! than compile `notify` into the APK to have it fail at runtime, the Android
+//! build gets a stub with the same signature whose constructor always fails —
+//! callers already treat that as "no live reload", so nothing else changes.
+
+#[cfg(not(target_os = "android"))]
 use notify_debouncer_mini::notify::{self, RecommendedWatcher};
+#[cfg(not(target_os = "android"))]
 use notify_debouncer_mini::{DebounceEventResult, DebouncedEventKind, new_debouncer};
 use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "android"))]
 use std::sync::mpsc;
+#[cfg(not(target_os = "android"))]
 use std::time::Duration;
 
+#[cfg(not(target_os = "android"))]
 pub struct FileWatcher {
     _debouncer: notify_debouncer_mini::Debouncer<RecommendedWatcher>,
     receiver: mpsc::Receiver<PathBuf>,
 }
 
+#[cfg(not(target_os = "android"))]
 impl FileWatcher {
     pub fn new(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let (tx, rx) = mpsc::channel();
@@ -45,7 +60,25 @@ impl FileWatcher {
     }
 }
 
-#[cfg(test)]
+/// Android stub — see the module docs. Construction always fails, so callers
+/// end up with `None` and simply never get change notifications.
+#[cfg(target_os = "android")]
+pub struct FileWatcher {
+    _private: (),
+}
+
+#[cfg(target_os = "android")]
+impl FileWatcher {
+    pub fn new(_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        Err("file watching is not supported on Android".into())
+    }
+
+    pub fn try_recv(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+#[cfg(all(test, not(target_os = "android")))]
 mod tests {
     use super::*;
     use std::fs;
