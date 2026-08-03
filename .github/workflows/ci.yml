@@ -71,6 +71,15 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
+      # Java must come first: sdkmanager is compiled for Java 17, and the
+      # runner's default JDK is older, so running setup-android before this
+      # fails with UnsupportedClassVersionError while accepting licenses.
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
       - name: Install Android SDK
         uses: android-actions/setup-android@v3
         with:
@@ -79,12 +88,6 @@ jobs:
             platforms;android-34
             build-tools;34.0.0
             ndk;26.3.11579264
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
 
       - name: Build native library
         run: |
