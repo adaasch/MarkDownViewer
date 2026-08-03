@@ -257,6 +257,18 @@ fn parse_blocks_until(events: &[Event], pos: &mut usize, end_tag: TagEnd) -> Vec
                 });
                 *pos += 1;
             }
+            // Tables nested inside a blockquote or a list item. Without this
+            // arm the `Start(Table)` event fell through to the catch-all and
+            // was skipped, leaving the cell contents to be picked up by the
+            // bare-inline collector below — so a table inside a quote rendered
+            // as one run-together paragraph ("CmdWhat`ls -la`List all files")
+            // instead of a table.
+            Event::Start(Tag::Table(_)) => {
+                *pos += 1;
+                let (headers, rows) = parse_table(events, pos);
+                elements.push(MdElement::Table { headers, rows });
+                *pos += 1;
+            }
             Event::Start(Tag::BlockQuote(_)) => {
                 *pos += 1;
                 let content = parse_blocks_until(events, pos, TagEnd::BlockQuote(None));
@@ -1020,6 +1032,70 @@ mod tests {
             }
             _ => panic!("Expected Table, got: {elements:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_table_inside_blockquote() {
+        // Regression: `parse_blocks_until` had no Table arm, so the table
+        // events were skipped and the cell text was swept up by the bare-inline
+        // collector, rendering as one run-together paragraph.
+        let md = "> Quoted:\n>\n> | Cmd | What |\n> |-----|------|\n> | `ls` | List files |\n";
+        let elements = parse_markdown(md);
+        let quote = match &elements[0] {
+            MdElement::BlockQuote(children) => children,
+            other => panic!("Expected BlockQuote, got: {other:?}"),
+        };
+        let table = quote
+            .iter()
+            .find(|e| matches!(e, MdElement::Table { .. }))
+            .unwrap_or_else(|| panic!("Expected a Table inside the quote, got: {quote:?}"));
+        match table {
+            MdElement::Table { headers, rows } => {
+                assert_eq!(headers.len(), 2, "Expected 2 header columns");
+                assert_eq!(rows.len(), 1, "Expected 1 data row");
+                assert!(extract_text_from_inlines(&headers[0]).contains("Cmd"));
+                assert!(extract_text_from_inlines(&rows[0][1]).contains("List files"));
+            }
+            _ => unreachable!(),
+        }
+        // The cells must not also survive as a flattened paragraph.
+        let flattened = quote.iter().any(|e| match e {
+            MdElement::Paragraph(inlines) => {
+                extract_text_from_inlines(inlines).contains("List files")
+            }
+            _ => false,
+        });
+        assert!(!flattened, "Table cells leaked into a paragraph: {quote:?}");
+    }
+
+    #[test]
+    fn test_parse_table_inside_list_item() {
+        // Same root cause: list item bodies go through `parse_blocks_until` too.
+        let md = "- Item:\n\n  | A | B |\n  |---|---|\n  | 1 | 2 |\n";
+        let elements = parse_markdown(md);
+        let items = match &elements[0] {
+            MdElement::List { items, .. } => items,
+            other => panic!("Expected List, got: {other:?}"),
+        };
+        let has_table = items
+            .iter()
+            .flat_map(|i| i.content.iter())
+            .any(|e| matches!(e, MdElement::Table { .. }));
+        assert!(has_table, "Expected a Table inside the list item: {items:?}");
+    }
+
+    #[test]
+    fn test_parse_table_in_nested_blockquote() {
+        let md = "> > | X |\n> > |---|\n> > | 9 |\n";
+        let elements = parse_markdown(md);
+        fn find_table(els: &[MdElement]) -> bool {
+            els.iter().any(|e| match e {
+                MdElement::Table { .. } => true,
+                MdElement::BlockQuote(children) => find_table(children),
+                _ => false,
+            })
+        }
+        assert!(find_table(&elements), "Expected Table nested two quotes deep: {elements:?}");
     }
 
     #[test]
