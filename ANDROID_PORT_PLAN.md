@@ -98,8 +98,11 @@ into the APK.
 
 ## Risks
 - ✅ eframe 0.33 + android-game-activity API surface — verified, uses `android-app` field in `NativeOptions`
-- ✅ notify crate uses inotify on Linux; on Android it may not work for /sdcard paths — fall back to manual reload button only
-- ✅ File watcher may not be supported on Android — kept best-effort
+- ✅ notify uses inotify, which does not work on the SAF-backed storage Android
+  documents live on, and documents are addressed by content URI rather than by
+  a watchable path. `src/watcher.rs` therefore ships an Android stub whose
+  constructor always fails; callers already treat that as "no live reload", and
+  `notify` is no longer compiled into the APK at all.
 - ✅ Font fallback on Android — uses system default fonts (no NotoSansSymbols2 path lookup)
 
 ## Build Commands

@@ -36,11 +36,6 @@ pub struct MdViewApp {
     is_plain_text: bool,
     toc: Vec<(u8, String, String)>,
     icon_texture: Option<egui::TextureHandle>,
-    /// On Android we may have been launched with a `content://` URI from an
-    /// intent. We cache the raw bytes in the app's `getFilesDir()` so the
-    /// rest of the renderer (which expects a `PathBuf`) can read them.
-    #[cfg(target_os = "android")]
-    cached_uri_path: Option<PathBuf>,
     #[cfg(target_os = "android")]
     pending_pick: PendingFilePick,
     /// The granted folder tree URI (from `ACTION_OPEN_DOCUMENT_TREE`). When set,
@@ -58,7 +53,21 @@ pub struct MdViewApp {
     /// True while a folder picker is in flight.
     #[cfg(target_os = "android")]
     pending_folder: bool,
+    /// When the pending-intent slot was last polled. Unlike the pickers, which
+    /// we only poll while one is in flight, a new intent can arrive at any
+    /// moment, so this one has to be checked on a timer instead.
+    #[cfg(target_os = "android")]
+    last_intent_poll: std::time::Instant,
 }
+
+/// How often to ask the bridge whether a new "open with" intent has arrived.
+///
+/// Each bridge call attaches the calling thread to the JVM and does a JNI
+/// dispatch. Running that unconditionally every frame — as all three drain
+/// functions used to — cost roughly 180 JNI round trips per second while the
+/// app sat idle. A quarter second is imperceptible for opening a document.
+#[cfg(target_os = "android")]
+const INTENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl MdViewApp {
     pub fn new(file_path: PathBuf) -> Self {
@@ -94,8 +103,6 @@ impl MdViewApp {
             toc,
             icon_texture: None,
             #[cfg(target_os = "android")]
-            cached_uri_path: None,
-            #[cfg(target_os = "android")]
             pending_pick: PendingFilePick::default(),
             #[cfg(target_os = "android")]
             android_tree_uri: None,
@@ -105,6 +112,8 @@ impl MdViewApp {
             show_browser: false,
             #[cfg(target_os = "android")]
             pending_folder: false,
+            #[cfg(target_os = "android")]
+            last_intent_poll: std::time::Instant::now(),
         }
     }
 
@@ -177,12 +186,12 @@ impl MdViewApp {
             is_plain_text,
             toc,
             icon_texture: None,
-            cached_uri_path: None,
             pending_pick: PendingFilePick::default(),
             android_tree_uri: None,
             android_browser: Vec::new(),
             show_browser: false,
             pending_folder: false,
+            last_intent_poll: std::time::Instant::now(),
         }
     }
 
@@ -278,7 +287,6 @@ impl MdViewApp {
             self.error = Some(format!("Could not cache file: {e}"));
             return;
         }
-        self.cached_uri_path = Some(cache_path.clone());
         self.is_plain_text = false;
         self.navigation
             .navigate_to(cache_path, egui::Vec2::ZERO, false);
@@ -330,6 +338,11 @@ impl MdViewApp {
     /// forever, permanently disabling the button.
     #[cfg(target_os = "android")]
     fn drain_android_folder(&mut self) {
+        // Nothing can arrive unless we launched a picker, so don't pay for a
+        // JNI round trip on every frame just to be told "no".
+        if !self.pending_folder {
+            return;
+        }
         let Some(tree) = crate::android_shim::pick_folder_result() else {
             return;
         };
@@ -362,6 +375,10 @@ impl MdViewApp {
     /// would keep the GPU awake for the rest of the session.
     #[cfg(target_os = "android")]
     fn drain_android_picker(&mut self) {
+        // See `drain_android_folder`: only poll while a picker is outstanding.
+        if !self.pending_pick.in_flight {
+            return;
+        }
         let Some(uri) = crate::android_shim::pick_file_result() else {
             return;
         };
@@ -377,6 +394,13 @@ impl MdViewApp {
     /// soon as the intent is delivered.
     #[cfg(target_os = "android")]
     fn drain_android_intent_data(&mut self) {
+        // A new intent can land at any time, so this can't be gated on a flag
+        // the way the pickers are — but it doesn't need frame-rate resolution
+        // either. See `INTENT_POLL_INTERVAL`.
+        if self.last_intent_poll.elapsed() < INTENT_POLL_INTERVAL {
+            return;
+        }
+        self.last_intent_poll = std::time::Instant::now();
         if let Some(uri) = crate::android_shim::consume_intent_data() {
             self.navigate_to_uri(uri);
         }
@@ -797,9 +821,11 @@ impl eframe::App for MdViewApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
 
-        // On Android we also need periodic repaints to drain the file picker.
+        // On Android, keep frames coming while a picker is outstanding so its
+        // result is drained promptly once the user returns from it. Both
+        // pickers need this — only the file picker used to be covered.
         #[cfg(target_os = "android")]
-        if self.pending_pick.in_flight {
+        if self.pending_pick.in_flight || self.pending_folder {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
     }

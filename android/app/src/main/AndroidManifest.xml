@@ -1,10 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="29" />
+    <!--
+    No storage permissions are declared on purpose. Every document this app
+    reads arrives either as a URI granted by the system file/folder picker or
+    from the intent that launched it, and both carry their own grant. Asking
+    for READ_EXTERNAL_STORAGE on top of that would widen the app's reach far
+    beyond what it uses and make it a "sensitive permission" case on Play.
+    -->
 
     <application
         android:label="@string/app_name"
@@ -12,8 +15,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:allowBackup="true"
         android:theme="@style/AppTheme"
-        android:supportsRtl="true"
-        android:requestLegacyExternalStorage="true">
+        android:supportsRtl="true">
 
         <activity
             android:name="eu.io_com.mdview.MainActivity"
@@ -28,25 +30,54 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!--
+            Documents that arrive with a MIME type — content:// from a file
+            manager, Downloads, or a cloud provider.
+
+            Deliberately no path/host constraints here. A content URI's path is
+            an opaque document ID, so a `pathPattern=".*\.md"` test rejects
+            exactly the URIs this filter exists to catch, and `host="*"`
+            requires an authority that file:// URIs do not have. The previous
+            single filter mixed all of these together.
+
+            `application/octet-stream` is the price of working at all: plenty
+            of file managers report .md that way because Android's MIME table
+            has no entry for it. It is the one broad type kept — `text/*` was
+            dropped so mdview stops offering itself for HTML, CSS and CSV.
+            -->
+            <intent-filter android:label="@string/open_with_mdview">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/markdown" />
+                <data android:mimeType="text/x-markdown" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+
+            <!-- Untyped file:// URIs, matched on extension instead. -->
             <intent-filter android:label="@string/open_with_mdview">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="file" />
-                <data android:scheme="content" />
-                <data android:mimeType="text/*" />
-                <data android:mimeType="text/markdown" />
-                <data android:mimeType="application/octet-stream" />
-                <data android:host="*" />
                 <data android:pathPattern=".*\\.md" />
                 <data android:pathPattern=".*\\.markdown" />
+                <data android:pathPattern=".*\\.mdown" />
+                <data android:pathPattern=".*\\.mkd" />
+                <data android:pathPattern=".*\\.mkdn" />
                 <data android:pathPattern=".*\\.txt" />
             </intent-filter>
+
+            <!-- "Share to mdview". Handled via EXTRA_STREAM in MainActivity. -->
             <intent-filter android:label="@string/open_with_mdview">
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/*" />
+                <data android:mimeType="text/plain" />
                 <data android:mimeType="text/markdown" />
+                <data android:mimeType="text/x-markdown" />
                 <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
