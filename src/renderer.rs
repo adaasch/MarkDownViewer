@@ -20,6 +20,9 @@ const TABLE_ROW_PAD_X: i8 = 6;
 
 /// Left inner padding of a blockquote — the accent bar lives in this gap.
 const BLOCKQUOTE_LEFT_PAD_PX: i8 = 16;
+/// Right inner padding of a blockquote. Shared with the wrap boundary so text
+/// inside a quote stops where the quote's padding starts.
+const BLOCKQUOTE_RIGHT_PAD_PX: i8 = 8;
 /// Distance from the quote box's left edge to the accent bar.
 const BLOCKQUOTE_BAR_INSET_PX: f32 = 5.0;
 const BLOCKQUOTE_BAR_WIDTH_PX: f32 = 3.0;
@@ -46,6 +49,23 @@ pub struct MdRenderer {
     pub highlighter: Highlighter,
     pub image_cache: ImageCache,
     pub scroll_target: Option<String>,
+    /// The x coordinate content is not allowed to wrap past.
+    ///
+    /// This exists because `ui.available_width()` cannot be trusted once
+    /// anything has overflowed. egui grows a `Ui`'s `max_rect` to contain every
+    /// widget placed in it (`Placer::advance_after_rects` → `Region::
+    /// expand_to_include_rect`), so a table too wide to fit permanently widens
+    /// the `Ui` it was drawn into. Everything after such a table would then
+    /// wrap at the *table's* width, and the whole rest of the document would
+    /// need horizontal scrolling to read — one wide table breaking the page.
+    ///
+    /// It is a right edge rather than a width because the pollution spreads:
+    /// a container opened inside a widened `Ui` is widened too, so its own
+    /// width is no more trustworthy than its parent's. An edge composes — any
+    /// nested `Ui` still knows where it *starts*, and start-to-edge is the
+    /// width it should wrap at. Only containers that inset their right side
+    /// (a blockquote) have to adjust it.
+    content_right: f32,
 }
 
 impl MdRenderer {
@@ -54,7 +74,18 @@ impl MdRenderer {
             highlighter: Highlighter::new(),
             image_cache: ImageCache::new(),
             scroll_target: None,
+            content_right: f32::INFINITY,
         }
+    }
+
+    /// The width text inside `ui` should wrap at.
+    ///
+    /// Never past the page's right edge, never wider than the space `ui`
+    /// actually has. See [`MdRenderer::content_right`] for why the second
+    /// clamp is not enough on its own.
+    fn wrap_width(&self, ui: &Ui) -> f32 {
+        let rect = ui.available_rect_before_wrap();
+        (self.content_right - rect.left()).min(rect.width()).max(0.0)
     }
 
     /// Render the parsed markdown elements into the UI.
@@ -66,6 +97,9 @@ impl MdRenderer {
         base_dir: &Path,
     ) -> Vec<RenderAction> {
         let mut actions = Vec::new();
+        // The page's right edge, sampled before anything has had a chance to
+        // widen the Ui by overflowing it.
+        self.content_right = ui.available_rect_before_wrap().right();
         for element in elements {
             self.render_element(ui, element, theme, base_dir, &mut actions);
             ui.add_space(4.0);
@@ -98,7 +132,7 @@ impl MdRenderer {
                 self.render_list(ui, *ordered, *start, items, theme, base_dir, actions);
             }
             MdElement::ThematicBreak => {
-                ui.separator();
+                self.separator(ui);
             }
             MdElement::BlockQuote(children) => {
                 self.render_blockquote(ui, children, theme, base_dir, actions);
@@ -132,7 +166,7 @@ impl MdRenderer {
             }
         }
         if level <= 2 {
-            ui.separator();
+            self.separator(ui);
         }
     }
 
@@ -155,7 +189,7 @@ impl MdRenderer {
         theme: &Theme,
     ) {
         let bg = theme.code_bg();
-        let available_width = ui.available_width();
+        let available_width = self.wrap_width(ui);
         Frame::new()
             .fill(bg)
             .inner_margin(Margin::same(8))
@@ -200,7 +234,7 @@ impl MdRenderer {
         const TABLE_WIDTH_SAFETY_PX: f32 = 2.0 * TABLE_ROW_PAD_X as f32 + 4.0;
 
         let total_spacing = (num_cols.saturating_sub(1) as f32) * spacing_x;
-        let available = (ui.available_width() - total_spacing - TABLE_WIDTH_SAFETY_PX).max(0.0);
+        let available = (self.wrap_width(ui) - total_spacing - TABLE_WIDTH_SAFETY_PX).max(0.0);
 
         // Measure text widths using the actual font so min/max widths match
         // what will be rendered — char-count × glyph_width('x') underestimates
@@ -331,9 +365,16 @@ impl MdRenderer {
     /// and a preferred width (widest full line). If the preferred widths sum
     /// to at most `available`, they are used as-is. Otherwise the available
     /// space is distributed between min and preferred in proportion to each
-    /// column's slack (max − min). If even the minimums don't fit, columns
-    /// fall back to their minimum widths — the table is allowed to exceed the
-    /// available width rather than squash words mid-letter.
+    /// column's slack (max − min).
+    ///
+    /// If even the minimums don't fit, the columns are squeezed proportionally
+    /// so the table still fits, and the text layout breaks inside the long
+    /// tokens that made the minimums too wide (epaint falls back to breaking
+    /// anywhere when a row has no word boundary to break at). A split
+    /// identifier is worth far more than a document that has to be scrolled
+    /// sideways. Only when the columns cannot even be squeezed to
+    /// `MIN_TABLE_COL_PX` — a table with more columns than the viewport can
+    /// hold at any legible width — does the table overflow.
     fn compute_column_widths<M: FnMut(&str, bool) -> f32>(
         headers: &[Vec<InlineElement>],
         rows: &[Vec<Vec<InlineElement>>],
@@ -384,8 +425,58 @@ impl MdRenderer {
                     .collect()
             }
         } else {
-            min_w
+            Self::squeeze_column_widths(&min_w, available)
         }
+    }
+
+    /// Scale `min_w` down so the columns sum to `available`, without letting any
+    /// column fall below `MIN_TABLE_COL_PX`.
+    ///
+    /// Columns are shrunk in proportion to their minimum width, so a column
+    /// holding one long token gives up more than a column of short words.
+    /// Columns that would be pushed under the floor are pinned there and the
+    /// remaining space is redistributed among the rest; each pass pins at least
+    /// one column, so the loop runs at most `min_w.len()` times.
+    ///
+    /// Returns `min_w` unchanged when the floors alone do not fit — at that
+    /// point there is no honest way to show the table inside the page, and
+    /// overflowing (with a horizontal scrollbar) beats a column-per-character.
+    fn squeeze_column_widths(min_w: &[f32], available: f32) -> Vec<f32> {
+        let n = min_w.len();
+        if n == 0 || n as f32 * MIN_TABLE_COL_PX > available {
+            return min_w.to_vec();
+        }
+
+        let mut widths = min_w.to_vec();
+        let mut pinned = vec![false; n];
+        let mut remaining = available;
+
+        loop {
+            let free_sum: f32 = (0..n).filter(|&i| !pinned[i]).map(|i| min_w[i]).sum();
+            if free_sum <= 0.0 {
+                break;
+            }
+            let scale = remaining / free_sum;
+            let mut pinned_any = false;
+            for i in 0..n {
+                if !pinned[i] && min_w[i] * scale < MIN_TABLE_COL_PX {
+                    pinned[i] = true;
+                    widths[i] = MIN_TABLE_COL_PX;
+                    remaining -= MIN_TABLE_COL_PX;
+                    pinned_any = true;
+                }
+            }
+            if !pinned_any {
+                for i in 0..n {
+                    if !pinned[i] {
+                        widths[i] = min_w[i] * scale;
+                    }
+                }
+                break;
+            }
+        }
+
+        widths
     }
 
     /// Flatten a table cell into `(text, monospace)` runs so each run can be
@@ -481,6 +572,9 @@ impl MdRenderer {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                 ui.add_space(16.0);
                 ui.label(&marker);
+                // No boundary adjustment needed: the item's content starts to
+                // the right of the marker, and `wrap_width` measures from
+                // wherever a Ui starts.
                 ui.vertical(|ui| {
                     for element in &item.content {
                         self.render_element(ui, element, theme, base_dir, actions);
@@ -506,15 +600,21 @@ impl MdRenderer {
             .fill(bg_color)
             .inner_margin(Margin {
                 left: BLOCKQUOTE_LEFT_PAD_PX,
-                right: 8,
+                right: BLOCKQUOTE_RIGHT_PAD_PX,
                 top: 8,
                 bottom: 8,
             })
             .corner_radius(2.0)
             .show(ui, |ui| {
+                // The quote's left inset comes for free — nested Uis start
+                // where the quote's content starts. Its right inset does not,
+                // so pull the boundary in by the frame's right margin.
+                let outer = self.content_right;
+                self.content_right = outer - BLOCKQUOTE_RIGHT_PAD_PX as f32;
                 for child in children {
                     self.render_element(ui, child, theme, base_dir, actions);
                 }
+                self.content_right = outer;
             });
 
         // Draw the left accent bar *after* the frame has been laid out, so it
@@ -542,7 +642,7 @@ impl MdRenderer {
             return;
         }
         if is_horizontal_rule_tag(trimmed) {
-            ui.separator();
+            self.separator(ui);
             return;
         }
         let text = html_to_display_text(trimmed);
@@ -609,8 +709,9 @@ impl MdRenderer {
     ) {
         if !Self::has_interactive(inlines) {
             // Fast path: pure text, build a single LayoutJob
+            let limit = self.wrap_width(ui);
             let mut job = LayoutJob::default();
-            job.wrap.max_width = wrap_width.unwrap_or_else(|| ui.available_width());
+            job.wrap.max_width = wrap_width.unwrap_or(limit);
             job.break_on_newline = true;
             let mut style = InlineStyleState {
                 bold,
@@ -628,7 +729,9 @@ impl MdRenderer {
                 ui.painter()
                     .galley(rect.min, galley, theme.text_color());
             } else {
-                ui.label(job);
+                Self::within_width(ui, limit, |ui| {
+                    ui.label(job);
+                });
             }
         } else {
             // Mixed path: text + interactive elements
@@ -637,6 +740,42 @@ impl MdRenderer {
                 wrap_width,
             );
         }
+    }
+
+    /// Run `add` in a `Ui` no wider than `width`.
+    ///
+    /// Widgets that size themselves from `ui.available_width()` — labels,
+    /// separators — cannot simply be told how wide to be. A `LayoutJob`'s own
+    /// `wrap.max_width`, for instance, does not survive `ui.label`:
+    /// `WidgetText::into_galley` replaces the job's whole `wrap` with one
+    /// derived from the `Ui`. So when the `Ui` has been widened past the page
+    /// by an overflowing table, the way to hold a widget to page width — while
+    /// still getting the real widget, with text selection and the rest — is to
+    /// put it in a child `Ui` that is narrow enough.
+    ///
+    /// The child only exists when it is needed; on an unpolluted page this is
+    /// exactly the widget on its own. See [`MdRenderer::content_right`].
+    fn within_width(ui: &mut Ui, width: f32, add: impl FnOnce(&mut Ui)) {
+        if width >= ui.available_width() {
+            add(ui);
+            return;
+        }
+        ui.allocate_ui_with_layout(
+            Vec2::new(width, 0.0),
+            egui::Layout::top_down(egui::Align::LEFT),
+            |ui| {
+                ui.set_max_width(width);
+                add(ui);
+            },
+        );
+    }
+
+    /// A horizontal rule that stops at the page boundary rather than at
+    /// whatever width an overflowing table left the `Ui` at.
+    fn separator(&self, ui: &mut Ui) {
+        Self::within_width(ui, self.wrap_width(ui), |ui| {
+            ui.separator();
+        });
     }
 
     /// Render inline sequence that contains links or images.
@@ -655,15 +794,16 @@ impl MdRenderer {
         strikethrough: bool,
         wrap_width: Option<f32>,
     ) {
-        let explicit_width = wrap_width;
+        // Sampled outside the closure: `horizontal_wrapped` inherits the parent
+        // Ui's width, so if a wide table has already stretched the page this is
+        // where that has to be undone.
+        let row_width = wrap_width.unwrap_or_else(|| self.wrap_width(ui));
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            if let Some(w) = explicit_width {
-                ui.set_max_width(w);
-            }
+            ui.set_max_width(row_width);
 
             let mut job = LayoutJob::default();
-            job.wrap.max_width = explicit_width.unwrap_or_else(|| ui.available_width());
+            job.wrap.max_width = row_width;
             job.break_on_newline = true;
 
             for inline in inlines {
@@ -1431,17 +1571,86 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_column_widths_overflow_on_huge_unbreakable_word() {
-        // A column contains a single word longer than the available width
+    fn test_compute_column_widths_squeezes_huge_unbreakable_word_to_fit() {
+        // A column contains a single word longer than the available width.
+        // It is squeezed to fit rather than overflowing — the word gets broken
+        // across lines at layout time. Overflowing here used to widen the Ui,
+        // which made the whole rest of the document wrap at the table's width.
         let huge = "a".repeat(200);
         let headers = vec![txt(&huge)];
         let rows: Vec<Vec<Vec<InlineElement>>> = vec![];
         let available = 100.0;
         let widths = MdRenderer::compute_column_widths(&headers, &rows, available, test_measure);
         assert_eq!(widths.len(), 1);
-        // Min width is the longest word ≈ 200 * 7 = 1400px, which exceeds 100.
-        // Expected: table overflows; column uses min width.
-        assert!(widths[0] > available, "expected overflow: width {} should exceed available {}", widths[0], available);
+        assert!(
+            widths[0] <= available + 0.01,
+            "width {} should have been squeezed to fit {}",
+            widths[0],
+            available
+        );
+    }
+
+    #[test]
+    fn test_compute_column_widths_overflows_when_columns_cannot_fit_at_all() {
+        // Enough columns that even MIN_TABLE_COL_PX each will not fit. There is
+        // no honest way to show this table inside the page, so it overflows and
+        // the document grows a horizontal scrollbar.
+        let n = 20;
+        let headers: Vec<_> = (0..n).map(|_| txt("wide content here")).collect();
+        let rows: Vec<Vec<Vec<InlineElement>>> = vec![];
+        let available = (n as f32) * MIN_TABLE_COL_PX - 1.0;
+        let widths = MdRenderer::compute_column_widths(&headers, &rows, available, test_measure);
+        let total: f32 = widths.iter().sum();
+        assert!(
+            total > available,
+            "expected overflow: total {total} should exceed available {available}"
+        );
+        for w in &widths {
+            assert!(*w >= MIN_TABLE_COL_PX - 0.01);
+        }
+    }
+
+    #[test]
+    fn test_squeeze_column_widths_fills_available_proportionally() {
+        // 100 : 300 stays 1 : 3 after squeezing into 200.
+        let widths = MdRenderer::squeeze_column_widths(&[100.0, 300.0], 200.0);
+        let total: f32 = widths.iter().sum();
+        assert!((total - 200.0).abs() < 0.01, "total {total} should fill 200");
+        assert!(
+            (widths[1] / widths[0] - 3.0).abs() < 0.01,
+            "ratio should be preserved, got {:?}",
+            widths
+        );
+    }
+
+    #[test]
+    fn test_squeeze_column_widths_pins_at_floor_and_redistributes() {
+        // Column 0 would be scaled to well under the floor. It is pinned there
+        // and the space it did not take goes to the other columns, so the total
+        // still fills exactly.
+        let min_w = [50.0, 2000.0, 2000.0];
+        let available = 400.0;
+        let widths = MdRenderer::squeeze_column_widths(&min_w, available);
+        assert!(
+            (widths[0] - MIN_TABLE_COL_PX).abs() < 0.01,
+            "col0 {} should be pinned at the floor",
+            widths[0]
+        );
+        let total: f32 = widths.iter().sum();
+        assert!(
+            (total - available).abs() < 0.01,
+            "total {total} should fill {available}"
+        );
+        assert!((widths[1] - widths[2]).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_squeeze_column_widths_gives_up_when_floors_do_not_fit() {
+        let min_w = [500.0, 500.0, 500.0];
+        // Three columns cannot fit at the floor in this much space.
+        let available = 3.0 * MIN_TABLE_COL_PX - 1.0;
+        let widths = MdRenderer::squeeze_column_widths(&min_w, available);
+        assert_eq!(widths, min_w.to_vec());
     }
 
     #[test]
@@ -1553,13 +1762,38 @@ mod tests {
 
     #[test]
     fn test_compute_column_widths_interpolation_respects_minimum() {
-        // When squeezed, a column should never get less than its longest-word width.
+        // While the minimums still fit, a column never gets less than its
+        // longest-word width — only the slack above the minimum is rationed.
         let headers = vec![txt("supercalifragilistic"), txt("A")];
-        let rows = vec![vec![txt("short"), txt("x".repeat(500).as_str())]];
+        let long_line = "word ".repeat(60);
+        let rows = vec![vec![txt("short"), txt(&long_line)]];
         let available = 300.0;
         let widths = MdRenderer::compute_column_widths(&headers, &rows, available, test_measure);
         // Column 0's longest word is "supercalifragilistic" = 20 chars * 7 + padding ≈ 146
         let col0_min = 20.0 * 7.0;
         assert!(widths[0] >= col0_min - 10.0, "col0 width {} should be >= {}", widths[0], col0_min);
+    }
+
+    #[test]
+    fn test_compute_column_widths_squeeze_costs_the_widest_column_most() {
+        // Past the point where minimums fit, columns are squeezed in proportion
+        // to their minimum, so a column holding one long token gives up more
+        // absolute width than a column of short words.
+        let headers = vec![txt("short"), txt("x".repeat(500).as_str())];
+        let rows: Vec<Vec<Vec<InlineElement>>> = vec![];
+        let available = 300.0;
+        let widths = MdRenderer::compute_column_widths(&headers, &rows, available, test_measure);
+        let total: f32 = widths.iter().sum();
+        assert!(
+            total <= available + 0.01,
+            "total {total} should fit in {available}"
+        );
+        assert!(
+            widths[1] > widths[0],
+            "the long column should still be the wider one, got {widths:?}"
+        );
+        for w in &widths {
+            assert!(*w >= MIN_TABLE_COL_PX - 0.01, "column {w} fell below the floor");
+        }
     }
 }
