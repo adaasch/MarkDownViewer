@@ -9,7 +9,20 @@ use crate::parser::{InlineElement, ListItem, MdElement};
 use crate::theme::Theme;
 
 const MIN_TABLE_COL_PX: f32 = 40.0;
-const TABLE_CELL_PADDING_PX: f32 = 6.0;
+/// Slack added to every measured column so text never sits flush against the
+/// column's wrap boundary (sub-pixel layout differences would otherwise push
+/// the last word onto a second line).
+const TABLE_CELL_PADDING_PX: f32 = 4.0;
+/// Gutter painted between two adjacent columns.
+const TABLE_COL_GUTTER_PX: f32 = 16.0;
+/// Horizontal padding between the row stripe's edge and the first/last column.
+const TABLE_ROW_PAD_X: i8 = 6;
+
+/// Left inner padding of a blockquote — the accent bar lives in this gap.
+const BLOCKQUOTE_LEFT_PAD_PX: i8 = 16;
+/// Distance from the quote box's left edge to the accent bar.
+const BLOCKQUOTE_BAR_INSET_PX: f32 = 5.0;
+const BLOCKQUOTE_BAR_WIDTH_PX: f32 = 3.0;
 
 #[derive(Clone, Debug, Default)]
 struct InlineStyleState {
@@ -179,32 +192,40 @@ impl MdRenderer {
         actions: &mut Vec<RenderAction>,
     ) {
         let num_cols = headers.len().max(1);
-        let spacing_x = 8.0f32;
+        let spacing_x = TABLE_COL_GUTTER_PX;
         let row_pad_y = 3.0f32;
-        // Frame inner_margin (left + right) + safety buffer so the table never
-        // pushes the page past ui.available_width() — otherwise the outer
+        // Row frame inner_margin (left + right) + safety buffer so the table
+        // never pushes the page past ui.available_width() — otherwise the outer
         // ScrollArea adds a horizontal scrollbar for a couple of stray pixels.
-        const TABLE_WIDTH_SAFETY_PX: f32 = 8.0;
+        const TABLE_WIDTH_SAFETY_PX: f32 = 2.0 * TABLE_ROW_PAD_X as f32 + 4.0;
 
         let total_spacing = (num_cols.saturating_sub(1) as f32) * spacing_x;
         let available = (ui.available_width() - total_spacing - TABLE_WIDTH_SAFETY_PX).max(0.0);
 
         // Measure text widths using the actual font so min/max widths match
         // what will be rendered — char-count × glyph_width('x') underestimates
-        // wider letters and causes single-word headers to wrap.
-        let font_id = FontId::new(14.0, FontFamily::Proportional);
+        // wider letters and causes single-word headers to wrap. Inline code is
+        // measured in the monospace family it is actually laid out in; treating
+        // it as proportional under-measures it badly and makes code cells wrap
+        // even when the table has room to spare.
+        let prop_font = FontId::new(14.0, FontFamily::Proportional);
+        let mono_font = FontId::new(14.0, FontFamily::Monospace);
         let col_widths = ui.fonts_mut(|fonts| {
-            let measure = |s: &str| -> f32 {
+            let mut measure = |s: &str, monospace: bool| -> f32 {
                 if s.is_empty() {
-                    0.0
-                } else {
-                    fonts
-                        .layout_no_wrap(s.to_string(), font_id.clone(), Color32::WHITE)
-                        .size()
-                        .x
+                    return 0.0;
                 }
+                let font = if monospace {
+                    mono_font.clone()
+                } else {
+                    prop_font.clone()
+                };
+                fonts
+                    .layout_no_wrap(s.to_string(), font, Color32::WHITE)
+                    .size()
+                    .x
             };
-            Self::compute_column_widths(headers, rows, available, measure)
+            Self::compute_column_widths(headers, rows, available, &mut measure)
         });
 
         let stripe_color = theme.table_stripe_bg();
@@ -277,8 +298,8 @@ impl MdRenderer {
         Frame::new()
             .fill(fill)
             .inner_margin(Margin {
-                left: 2,
-                right: 2,
+                left: TABLE_ROW_PAD_X,
+                right: TABLE_ROW_PAD_X,
                 top: row_pad_y as i8,
                 bottom: row_pad_y as i8,
             })
@@ -313,7 +334,7 @@ impl MdRenderer {
     /// column's slack (max − min). If even the minimums don't fit, columns
     /// fall back to their minimum widths — the table is allowed to exceed the
     /// available width rather than squash words mid-letter.
-    fn compute_column_widths<M: FnMut(&str) -> f32>(
+    fn compute_column_widths<M: FnMut(&str, bool) -> f32>(
         headers: &[Vec<InlineElement>],
         rows: &[Vec<Vec<InlineElement>>],
         available: f32,
@@ -324,34 +345,14 @@ impl MdRenderer {
         let mut min_w = vec![0.0f32; num_cols];
         let mut max_w = vec![0.0f32; num_cols];
 
-        let mut measure_cell = |cell: &[InlineElement]| -> (f32, f32) {
-            let text = Self::extract_text(cell);
-            // max: widest single line (assuming no wrap)
-            let mut max_px = 0.0f32;
-            for line in text.lines() {
-                max_px = max_px.max(measure(line));
-            }
-            // min: widest unbreakable word
-            let mut min_px = 0.0f32;
-            for word in text.split_whitespace() {
-                min_px = min_px.max(measure(word));
-            }
-            max_px += TABLE_CELL_PADDING_PX;
-            min_px += TABLE_CELL_PADDING_PX;
-            (
-                min_px.max(MIN_TABLE_COL_PX),
-                max_px.max(min_px).max(MIN_TABLE_COL_PX),
-            )
-        };
-
         for (i, h) in headers.iter().enumerate().take(num_cols) {
-            let (mn, mx) = measure_cell(h);
+            let (mn, mx) = Self::measure_cell_extents(h, &mut measure);
             min_w[i] = min_w[i].max(mn);
             max_w[i] = max_w[i].max(mx);
         }
         for row in rows {
             for (i, cell) in row.iter().enumerate().take(num_cols) {
-                let (mn, mx) = measure_cell(cell);
+                let (mn, mx) = Self::measure_cell_extents(cell, &mut measure);
                 min_w[i] = min_w[i].max(mn);
                 max_w[i] = max_w[i].max(mx);
             }
@@ -385,6 +386,75 @@ impl MdRenderer {
         } else {
             min_w
         }
+    }
+
+    /// Flatten a table cell into `(text, monospace)` runs so each run can be
+    /// measured in the font family it will actually be laid out in.
+    ///
+    /// `extract_text` collapses everything into one `String`, which loses the
+    /// distinction between proportional text and inline code. Monospace is
+    /// meaningfully wider at the same point size, so measuring a `` `code` ``
+    /// cell as proportional hands the column too little width and the cell
+    /// wraps even when the table is nowhere near the window edge.
+    fn cell_runs(inlines: &[InlineElement], out: &mut Vec<(String, bool)>) {
+        for inline in inlines {
+            match inline {
+                InlineElement::Text(t) => out.push((t.clone(), false)),
+                InlineElement::Code(c) => out.push((c.clone(), true)),
+                InlineElement::Bold(children)
+                | InlineElement::Italic(children)
+                | InlineElement::Strikethrough(children) => Self::cell_runs(children, out),
+                InlineElement::Link { content, .. } => Self::cell_runs(content, out),
+                InlineElement::Image { alt, .. } => out.push((alt.clone(), false)),
+                InlineElement::SoftBreak => out.push((" ".to_string(), false)),
+                InlineElement::HardBreak => out.push(("\n".to_string(), false)),
+                InlineElement::Html(html) => {
+                    out.push((html_to_display_text(html), false));
+                }
+            }
+        }
+    }
+
+    /// Measure a cell's `(min, max)` width.
+    ///
+    /// `max` is the width of the widest full line assuming no wrapping; `min`
+    /// is the widest token that cannot be broken. Widths accumulate across runs
+    /// within a line and reset at every hard break.
+    fn measure_cell_extents<M: FnMut(&str, bool) -> f32>(
+        cell: &[InlineElement],
+        measure: &mut M,
+    ) -> (f32, f32) {
+        let mut runs = Vec::new();
+        Self::cell_runs(cell, &mut runs);
+
+        let mut max_px = 0.0f32;
+        let mut line_px = 0.0f32;
+        let mut min_px = 0.0f32;
+
+        for (text, monospace) in &runs {
+            let mut lines = text.split('\n');
+            if let Some(first) = lines.next() {
+                line_px += measure(first, *monospace);
+            }
+            for line in lines {
+                max_px = max_px.max(line_px);
+                line_px = measure(line, *monospace);
+            }
+            // A word straddling two runs is measured as two shorter words. That
+            // only relaxes `min`, and `min` only binds when the table is being
+            // squeezed, so the approximation is not worth the bookkeeping.
+            for word in text.split_whitespace() {
+                min_px = min_px.max(measure(word, *monospace));
+            }
+        }
+        max_px = max_px.max(line_px);
+
+        max_px += TABLE_CELL_PADDING_PX;
+        min_px += TABLE_CELL_PADDING_PX;
+        (
+            min_px.max(MIN_TABLE_COL_PX),
+            max_px.max(min_px).max(MIN_TABLE_COL_PX),
+        )
     }
 
     fn render_list(
@@ -432,31 +502,34 @@ impl MdRenderer {
         let bg_color = theme.blockquote_bg();
 
         // Asymmetric margin: extra left padding for border bar + gap
-        Frame::new()
+        let framed = Frame::new()
             .fill(bg_color)
             .inner_margin(Margin {
-                left: 16,
+                left: BLOCKQUOTE_LEFT_PAD_PX,
                 right: 8,
                 top: 8,
                 bottom: 8,
             })
             .corner_radius(2.0)
             .show(ui, |ui| {
-                // Draw left border bar in the margin gap
-                let rect = ui.max_rect();
-                let bar_x = rect.left() - 12.0;
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(bar_x, rect.top()),
-                        egui::pos2(bar_x, rect.bottom()),
-                    ],
-                    Stroke::new(3.0, border_color),
-                );
-
                 for child in children {
                     self.render_element(ui, child, theme, base_dir, actions);
                 }
             });
+
+        // Draw the left accent bar *after* the frame has been laid out, so it
+        // spans exactly the quote's final height. Painting it from inside the
+        // frame closure would have to use `ui.max_rect()`, which is the space
+        // still *available* to the frame rather than the space it ends up
+        // using — the bar then runs past the bottom of the quote and bleeds
+        // into whatever follows it.
+        let rect = framed.response.rect;
+        let bar = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + BLOCKQUOTE_BAR_INSET_PX, rect.top()),
+            egui::vec2(BLOCKQUOTE_BAR_WIDTH_PX, rect.height()),
+        );
+        ui.painter()
+            .rect_filled(bar, BLOCKQUOTE_BAR_WIDTH_PX / 2.0, border_color);
     }
 
     fn render_html_block(&self, ui: &mut Ui, html: &str, theme: &Theme) {
@@ -1314,10 +1387,16 @@ mod tests {
         vec![InlineElement::Text(s.to_string())]
     }
 
-    /// Deterministic test measure function: 7px per char. Matches the old
-    /// behavior so the numeric expectations in existing tests still hold.
-    fn test_measure(s: &str) -> f32 {
-        s.chars().count() as f32 * 7.0
+    fn code(s: &str) -> Vec<InlineElement> {
+        vec![InlineElement::Code(s.to_string())]
+    }
+
+    /// Deterministic test measure function: 7px per proportional char, 11px per
+    /// monospace char. The proportional figure matches the old behavior so the
+    /// numeric expectations in existing tests still hold.
+    fn test_measure(s: &str, monospace: bool) -> f32 {
+        let per_char = if monospace { 11.0 } else { 7.0 };
+        s.chars().count() as f32 * per_char
     }
 
     #[test]
@@ -1394,6 +1473,82 @@ mod tests {
         let widths = MdRenderer::compute_column_widths(&headers, &rows, 300.0, test_measure);
         assert_eq!(widths.len(), 1);
         assert!(widths[0] >= MIN_TABLE_COL_PX);
+    }
+
+    #[test]
+    fn test_inline_code_column_measured_as_monospace() {
+        // Regression: a `code` cell used to be measured in the proportional
+        // font, so the column came out too narrow and the cell wrapped even
+        // though the table had plenty of room. The code column must be at
+        // least as wide as the monospace rendering of its content.
+        let word = "git-rebase-interactive";
+        let headers = vec![txt("Command"), txt("Description")];
+        let rows = vec![vec![code(word), txt("Reapply commits")]];
+        let widths = MdRenderer::compute_column_widths(&headers, &rows, 5000.0, test_measure);
+
+        let mono_px = word.chars().count() as f32 * 11.0;
+        assert!(
+            widths[0] >= mono_px,
+            "code column {} should fit its monospace width {}",
+            widths[0],
+            mono_px
+        );
+    }
+
+    #[test]
+    fn test_code_cell_wider_than_same_text_as_prose() {
+        let s = "abcdefghijklmnop";
+        let code_widths =
+            MdRenderer::compute_column_widths(&vec![code(s)], &[], 5000.0, test_measure);
+        let text_widths =
+            MdRenderer::compute_column_widths(&vec![txt(s)], &[], 5000.0, test_measure);
+        assert!(
+            code_widths[0] > text_widths[0],
+            "monospace column {} should exceed proportional column {}",
+            code_widths[0],
+            text_widths[0]
+        );
+    }
+
+    #[test]
+    fn test_measure_cell_extents_accumulates_mixed_runs() {
+        // "run " (prose) + "code" (monospace) on one line: max must be the sum
+        // of both runs measured in their own font, not either one alone.
+        let cell = vec![
+            InlineElement::Text("run ".to_string()),
+            InlineElement::Code("code".to_string()),
+        ];
+        let mut m = test_measure;
+        let (min, max) = MdRenderer::measure_cell_extents(&cell, &mut m);
+        let expected_max = 4.0 * 7.0 + 4.0 * 11.0 + TABLE_CELL_PADDING_PX;
+        assert!(
+            (max - expected_max).abs() < 0.01,
+            "max {max} should be {expected_max}"
+        );
+        // Widest unbreakable token is the 4-char monospace "code" = 44px.
+        assert!(
+            (min - (4.0 * 11.0 + TABLE_CELL_PADDING_PX)).abs() < 0.01,
+            "min {min} should be the monospace word width"
+        );
+    }
+
+    #[test]
+    fn test_measure_cell_extents_resets_at_hard_break() {
+        // Both lines are 10 chars, comfortably above MIN_TABLE_COL_PX so the
+        // column floor does not mask the result.
+        let cell = vec![
+            InlineElement::Text("aaaaaaaaaa".to_string()),
+            InlineElement::HardBreak,
+            InlineElement::Text("bbbbbbbbbb".to_string()),
+        ];
+        let mut m = test_measure;
+        let (_, max) = MdRenderer::measure_cell_extents(&cell, &mut m);
+        // Widest line is one 10-char run (74px), not both concatenated (144px).
+        let expected = 10.0 * 7.0 + TABLE_CELL_PADDING_PX;
+        assert!(
+            (max - expected).abs() < 0.01,
+            "max {max} should be the widest single line {expected}, not the sum of both"
+        );
     }
 
     #[test]
