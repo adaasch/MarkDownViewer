@@ -333,10 +333,17 @@ jobs:
           set -euxo pipefail
           tag="${{ steps.release.outputs.tag }}"
           prerelease_flag=""
-          if [[ "${{ inputs.prerelease }}" == "true" ]]; then
+          # The `prerelease` input only exists on workflow_dispatch, so a plain
+          # tag push always produced a full release no matter what. Also honour
+          # the semver convention: anything with a pre-release suffix
+          # (v1.2.3-rc1, -beta, -alpha) is not a final release.
+          if [[ "${{ inputs.prerelease }}" == "true" || "$tag" == *-* ]]; then
             prerelease_flag="--prerelease"
           fi
 
+          # An existing release is left as-is apart from its artifacts — this is
+          # how a release can be pre-created with the exact notes and
+          # prerelease flag wanted, then filled in by this job.
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" release-artifacts/* --clobber
           else
