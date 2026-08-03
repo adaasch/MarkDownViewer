@@ -164,20 +164,16 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.sha }}
 
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-3-dev \
-            libglib2.0-dev \
-            libgdk-pixbuf-2.0-dev \
-            libpango1.0-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev
+      # No GTK/xcb packages here on purpose: the Android target does not pull
+      # rfd (or anything else linking against them), and nothing in its
+      # dependency graph has a build script that needs them on the host.
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # cargo-ndk does not install these itself; without them the build
+          # fails with "target may not be installed".
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -247,6 +243,32 @@ jobs:
           fi
           cd android
           ./gradlew :app:assembleRelease
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          tools="$ANDROID_HOME/build-tools/34.0.0"
+
+          # A signature is not optional — an unsigned APK cannot be installed.
+          "$tools/apksigner" verify --print-certs "$apk"
+
+          badging=$("$tools/aapt2" dump badging "$apk")
+          echo "$badging" | grep -E "^package|native-code"
+
+          # Guard the failure mode that motivated the copyJniLibs change: an
+          # APK that installs fine and then dies on UnsatisfiedLinkError.
+          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+            echo "$badging" | grep -q "'$abi'" \
+              || { echo "::error::APK is missing native code for $abi"; exit 1; }
+          done
+
+          # The version in the APK must be the version we are releasing.
+          want="${{ steps.version.outputs.version }}"
+          got=$(echo "$badging" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+          [[ "$got" == "$want" ]] \
+            || { echo "::error::APK versionName '$got' != release version '$want'"; exit 1; }
 
       - name: Stage APK
         shell: bash

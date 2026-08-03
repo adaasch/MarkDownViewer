@@ -2,13 +2,15 @@
 
 A simple, fast and lightweight standalone Markdown Viewer written in Rust.
 
+Runs on Linux, macOS, Windows and Android — one renderer, one codebase.
+
 ## Features
 
 - GitHub Flavored Markdown rendering (tables, task lists, strikethrough)
 - Syntax highlighting for 50+ programming languages
 - Smart link handling (`.md` files open internally, others open in browser)
 - Back/forward navigation between markdown files
-- Live reload on file changes
+- Live reload on file changes (desktop)
 - Light and dark themes
 - Inline image rendering
 
@@ -17,6 +19,21 @@ A simple, fast and lightweight standalone Markdown Viewer written in Rust.
 ```bash
 mdview <FILE.md>
 ```
+
+### Android
+
+Install the APK from the [latest release](https://github.com/adaasch/MarkDownViewer/releases),
+then open a `.md` file from any file manager, or share one to mdview.
+
+Tap **📁** to grant access to a *folder* rather than a single file. This is the
+recommended way in: documents inside a granted folder can link to each other,
+and their images resolve, because Android hands the app access to the whole
+tree rather than to one document. **📄** opens a single file, which is quicker
+but leaves links to sibling files unresolvable — Android gives no way to reach
+them.
+
+Live reload is desktop-only: Android documents are read through the Storage
+Access Framework, which exposes no watchable path.
 
 ## Keyboard Shortcuts
 
@@ -46,7 +63,7 @@ The release workflow publishes:
 - Linux `tar.gz` archives
 - Linux `.deb` packages for Debian and Ubuntu based distros
 - Linux `.rpm` packages for Fedora, RHEL, Rocky, AlmaLinux, and openSUSE style distros
-- Android `app-release.apk` (universal APK supporting arm64-v8a, armeabi-v7a, x86_64, x86)
+- Android `mdview-<version>-android.apk` (universal APK: arm64-v8a, armeabi-v7a, x86_64, x86)
 - A `SHA256SUMS.txt` file for artifact verification
 
 ## Building for Android
