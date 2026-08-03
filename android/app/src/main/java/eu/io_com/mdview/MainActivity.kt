@@ -1,10 +1,12 @@
-package com.adaasch.mdview
+package eu.io_com.mdview
 
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.util.Log
 import androidx.activity.result.contract.ActivityResultContracts
 import com.google.androidgamesdk.GameActivity
@@ -39,7 +41,7 @@ class MainActivity : GameActivity() {
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
             if (uri == null) {
                 Log.i(TAG, "User cancelled file picker")
-                RustBridge.setPendingPickResult(null)
+                RustBridge.setPendingPickResult(RustBridge.PICKER_CANCELLED)
                 return@registerForActivityResult
             }
             // Persist permission so we can read it later.
@@ -59,7 +61,7 @@ class MainActivity : GameActivity() {
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
             if (uri == null) {
                 Log.i(TAG, "User cancelled folder picker")
-                RustBridge.setPendingFolderResult(null)
+                RustBridge.setPendingFolderResult(RustBridge.PICKER_CANCELLED)
                 return@registerForActivityResult
             }
             // Persist read permission for the whole tree so links between files
@@ -79,7 +81,13 @@ class MainActivity : GameActivity() {
         super.onCreate(savedInstanceState)
         // Set up the JNI bridge so the Rust layer can call into Kotlin.
         RustBridge.setActivity(this)
-        RustBridge.setPendingIntentData(intent?.data?.toString())
+        // Deliberately *not* queueing the launching intent for
+        // `consumeIntentData` here. `android_main` reads it directly via
+        // `intentDataString()` when it builds the app. Queueing it as well
+        // meant the launching document was read, cached and navigated to
+        // twice — once at startup and again on the first frame — which left a
+        // spurious second entry in the back history. Only `onNewIntent`, which
+        // arrives after the app is already running, needs the queue.
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -87,11 +95,32 @@ class MainActivity : GameActivity() {
         Log.i(TAG, "onNewIntent: ${intent.data}")
         // Update the activity's intent so getIntent() returns the latest one.
         setIntent(intent)
-        // Forward the new intent's data URI to the Rust layer.
-        val data = intent.data?.toString()
-        if (data != null) {
-            RustBridge.setPendingIntentData(data)
+        // Forward the new intent's URI to the Rust layer.
+        uriFromIntent(intent)?.let { RustBridge.setPendingIntentData(it) }
+    }
+
+    /**
+     * Extract the document URI an intent refers to.
+     *
+     * `ACTION_VIEW` puts it in the intent's data, but `ACTION_SEND` — which
+     * this activity also advertises in its manifest — puts it in the
+     * `EXTRA_STREAM` extra instead. Reading only `intent.data` meant sharing a
+     * file to mdview opened an empty window.
+     */
+    private fun uriFromIntent(intent: Intent?): String? {
+        if (intent == null) return null
+        intent.data?.let { return it.toString() }
+        if (intent.action == Intent.ACTION_SEND) {
+            val stream: Uri? =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                }
+            return stream?.toString()
         }
+        return null
     }
 
     override fun onDestroy() {
@@ -253,20 +282,31 @@ class MainActivity : GameActivity() {
     }
 
     /**
-     * Get the intent's data URI string (for "open with" support).
+     * Get the launching intent's URI (for "open with" and "share to" support).
      */
-    fun getIntentDataString(): String? {
-        val data = intent?.data
-        return data?.toString()
-    }
+    fun getIntentDataString(): String? = uriFromIntent(intent)
 
     /**
-     * Consume the pending intent data URI (called by Rust via JNI).
-     * Returns the URI string and clears it so it's only consumed once.
+     * Look up a document's human-readable display name.
+     *
+     * Without this the app titles the document with the tail of its URI, which
+     * for a SAF document is a percent-encoded ID like
+     * `primary%3ADocuments%2Fnotes.md`.
      */
-    fun consumeIntentData(): String? {
-        val data = intent?.data
-        return data?.toString()
+    fun displayNameImpl(uriString: String): String? {
+        return try {
+            val uri = Uri.parse(uriString)
+            contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME),
+                null, null, null,
+            )?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to read display name for $uriString: ${e.message}")
+            null
+        }
     }
 
     /**

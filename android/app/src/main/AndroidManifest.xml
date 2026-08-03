@@ -16,7 +16,7 @@
         android:requestLegacyExternalStorage="true">
 
         <activity
-            android:name="com.adaasch.mdview.MainActivity"
+            android:name="eu.io_com.mdview.MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode"
             android:launchMode="singleTask"

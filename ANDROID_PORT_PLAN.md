@@ -2,10 +2,10 @@
 
 ## Status: ✅ COMPLETE
 
-The Android port is complete and tested. The app builds, installs, and launches successfully on Android 8.0+ (API 26+).
+The Android port is complete and tested. The app builds, installs, and launches successfully on Android 7.0+ (API 24+).
 
 ## Goal
-Port the existing desktop markdown viewer (Rust + eframe/egui) to Android. Ship a signed release APK that runs on Android 8.0+ (API 26+), can be installed, and renders the same markdown content.
+Port the existing desktop markdown viewer (Rust + eframe/egui) to Android. Ship a signed release APK that runs on Android 7.0+ (API 24+), can be installed, and renders the same markdown content.
 
 ## Constraints
 - Keep desktop builds working (Linux/macOS/Windows) — no regressions
@@ -61,8 +61,8 @@ into the APK.
 1. ✅ Created `android/build.gradle.kts`, `android/settings.gradle.kts`, `android/gradle.properties`, `android/gradle/wrapper/`
 2. ✅ Created `android/app/build.gradle.kts` with NDK + cargo-ndk build hook
 3. ✅ Created `android/app/src/main/AndroidManifest.xml` with launcher + VIEW intent filters
-4. ✅ Created `android/app/src/main/java/com/adaasch/mdview/MainActivity.kt` (extends `GameActivity`)
-5. ✅ Created `android/app/src/main/java/com/adaasch/mdview/RustBridge.kt` (JNI bridge)
+4. ✅ Created `android/app/src/main/java/eu/io_com/mdview/MainActivity.kt` (extends `GameActivity`)
+5. ✅ Created `android/app/src/main/java/eu/io_com/mdview/RustBridge.kt` (JNI bridge)
 6. ✅ Created `android/app/src/main/res/values/strings.xml`, `styles.xml`
 7. ✅ Created `android/app/src/main/cpp/CMakeLists.txt` (prefab glue)
 
@@ -128,24 +128,24 @@ The Gradle build will automatically copy `libmdview.so` from
 ### Install on device:
 ```bash
 adb install -r android/app/build/outputs/apk/release/app-release.apk
-adb shell am start -n com.adaasch.mdview/.MainActivity
+adb shell am start -n eu.io_com.mdview/.MainActivity
 ```
 
 ## APK Structure
-- Package: `com.adaasch.mdview`
+- Package: `eu.io_com.mdview`
 - Version: 0.1.4
 - minSdk: 24 (Android 7.0)
 - targetSdk: 34 (Android 14)
 - ABIs: arm64-v8a, armeabi-v7a, x86, x86_64
 - Native libraries: `libmdview.so` (Rust code) + `libmdview_empty.so` (prefab glue)
-- Activity: `com.adaasch.mdview.MainActivity` extends `com.google.androidgamesdk.GameActivity`
+- Activity: `eu.io_com.mdview.MainActivity` extends `com.google.androidgamesdk.GameActivity`
 - Library name: `mdview` (specified in AndroidManifest.xml meta-data `android.app.lib_name`)
 
 ## Key Files
 - `src/lib.rs` — Android entry point (`#[no_mangle] fn android_main`)
 - `src/android_shim.rs` — JNI bridge to Kotlin
 - `src/app.rs` — `MdViewApp` with `android_new`, `launch_android_picker`, `drain_android_picker`, `navigate_to_uri`
-- `android/app/src/main/java/com/adaasch/mdview/MainActivity.kt` — Kotlin entry point
-- `android/app/src/main/java/com/adaasch/mdview/RustBridge.kt` — JNI bridge methods
+- `android/app/src/main/java/eu/io_com/mdview/MainActivity.kt` — Kotlin entry point
+- `android/app/src/main/java/eu/io_com/mdview/RustBridge.kt` — JNI bridge methods
 - `android/app/src/main/AndroidManifest.xml` — Activity declaration + intent filters
 - `android/app/build.gradle` — Gradle build config with cargo-ndk integration

@@ -218,8 +218,6 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Build native libraries with cargo-ndk
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo ndk \
@@ -232,19 +230,43 @@ jobs:
             build --release
 
       - name: Build APK with Gradle
+        # MDVIEW_KEYSTORE* are optional: without them the APK is debug-signed
+        # and usable for testing but not for distribution (Gradle warns).
+        env:
+          MDVIEW_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          MDVIEW_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          MDVIEW_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          MDVIEW_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
+          if [[ -n "${MDVIEW_KEYSTORE_BASE64:-}" ]]; then
+            echo "$MDVIEW_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            export MDVIEW_KEYSTORE="$RUNNER_TEMP/release.jks"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 secret is not set — the APK will be debug-signed and is not distributable."
+          fi
           cd android
           ./gradlew :app:assembleRelease
+
+      - name: Stage APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk \
+             "dist/${BINARY_NAME}-${{ steps.version.outputs.version }}-android.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v7
         with:
           name: release-android
-          path: android/app/build/outputs/apk/release/app-release.apk
+          path: dist/*
           if-no-files-found: error
 
   publish:
-    needs: build
+    # Must wait for build-android too, otherwise the release is cut before the
+    # APK artifact exists and `download-artifact` silently publishes without it.
+    needs: [build, build-android]
     runs-on: ubuntu-22.04
     steps:
       - name: Check out repository

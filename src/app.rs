@@ -141,12 +141,8 @@ impl MdViewApp {
             });
 
             if let Some(bytes) = bytes {
-                let display_name = uri
-                    .rsplit('/')
-                    .next()
-                    .and_then(|s| s.split('?').next())
-                    .unwrap_or("(no file)")
-                    .to_string();
+                let display_name = crate::android_shim::display_name(&uri)
+                    .unwrap_or_else(|| crate::android_paths::uri_display_name(&uri));
                 let fake_path = PathBuf::from(display_name);
                 match String::from_utf8(bytes) {
                     Ok(text) => {
@@ -221,35 +217,19 @@ impl MdViewApp {
         }
     }
 
-    /// Read a file's contents as a UTF-8 string. On Android we also handle
-    /// `content://` URIs by reading them via the JNI bridge.
+    /// Read a file's contents as a UTF-8 string.
+    ///
+    /// On Android this goes through [`crate::android_io`], which knows how to
+    /// resolve `content://` URIs, cached absolute paths and folder-tree
+    /// relative paths. The image loader uses the same resolver, so a document
+    /// and the images it embeds are always addressed the same way.
+    #[cfg(target_os = "android")]
     fn read_path(&self, path: &std::path::Path) -> Result<String, String> {
-        #[cfg(target_os = "android")]
-        {
-            let path_str = path.to_string_lossy().to_string();
-            if path_str.starts_with("content://") {
-                return crate::android_shim::read_uri(&path_str)
-                    .ok_or_else(|| format!("Could not read content URI: {path_str}"))
-                    .and_then(|b| {
-                        String::from_utf8(b).map_err(|e| format!("File is not valid UTF-8: {e}"))
-                    });
-            }
-            // When a folder tree has been granted, every other path is a
-            // tree-relative path (e.g. `sub/other.md`). Resolve it to a document
-            // URI by walking the tree, then read it via the content resolver.
-            // This is what lets links between sibling markdown files work.
-            if let Some(tree) = &self.android_tree_uri {
-                let rel = crate::android_paths::normalize_rel(&path_str);
-                return crate::android_shim::resolve_tree_path(tree, &rel)
-                    .and_then(|uri| crate::android_shim::read_uri(&uri))
-                    .ok_or_else(|| {
-                        format!("'{rel}' was not found in the opened folder")
-                    })
-                    .and_then(|b| {
-                        String::from_utf8(b).map_err(|e| format!("File is not valid UTF-8: {e}"))
-                    });
-            }
-        }
+        crate::android_io::read_to_string(path)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn read_path(&self, path: &std::path::Path) -> Result<String, String> {
         std::fs::read_to_string(path).map_err(|e| format!("{e}"))
     }
 
@@ -282,12 +262,8 @@ impl MdViewApp {
             }
         };
 
-        let display_name = uri
-            .rsplit('/')
-            .next()
-            .and_then(|s| s.split('?').next())
-            .unwrap_or("(unknown)")
-            .to_string();
+        let display_name = crate::android_shim::display_name(&uri)
+            .unwrap_or_else(|| crate::android_paths::uri_display_name(&uri));
         let safe_name: String = display_name
             .chars()
             .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
@@ -295,7 +271,7 @@ impl MdViewApp {
         let cache_name = format!("mdview-{safe_name}");
         let cache_dir = crate::android_shim::files_dir()
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("/data/data/com.adaasch.mdview/files"));
+            .unwrap_or_else(|| std::path::PathBuf::from("/data/data/eu.io_com.mdview/files"));
         let _ = std::fs::create_dir_all(&cache_dir);
         let cache_path = cache_dir.join(&cache_name);
         if let Err(e) = std::fs::write(&cache_path, &bytes) {
@@ -347,15 +323,25 @@ impl MdViewApp {
 
     /// Drain any pending folder-picker result. On success we remember the tree
     /// URI, list the markdown files it contains, and open the in-app browser.
+    ///
+    /// The bridge reports a cancelled picker as an empty string (see
+    /// [`crate::android_shim::PICKER_CANCELLED`]); without that signal a user
+    /// who backs out of the picker would leave `pending_folder` stuck at `true`
+    /// forever, permanently disabling the button.
     #[cfg(target_os = "android")]
     fn drain_android_folder(&mut self) {
-        if let Some(tree) = crate::android_shim::pick_folder_result() {
-            self.pending_folder = false;
-            self.android_browser = crate::android_shim::list_tree_markdown(&tree);
-            self.android_tree_uri = Some(tree);
-            self.show_browser = true;
-            self.error = None;
+        let Some(tree) = crate::android_shim::pick_folder_result() else {
+            return;
+        };
+        self.pending_folder = false;
+        if tree == crate::android_shim::PICKER_CANCELLED {
+            return;
         }
+        self.android_browser = crate::android_shim::list_tree_markdown(&tree);
+        crate::android_io::set_tree_uri(Some(tree.clone()));
+        self.android_tree_uri = Some(tree);
+        self.show_browser = true;
+        self.error = None;
     }
 
     /// Open a tree-relative file from the in-app folder browser.
@@ -368,16 +354,22 @@ impl MdViewApp {
 
     /// Drain any pending file picker result. Called at the top of every
     /// `update` so the user sees the new file as soon as it's picked.
+    ///
+    /// A cancelled picker comes back as [`crate::android_shim::PICKER_CANCELLED`]
+    /// rather than as "no result yet". The two have to be distinguishable: if
+    /// cancelling looked like "still waiting", `in_flight` would never clear,
+    /// the toolbar would show ⏳ forever and the 200 ms repaint timer below
+    /// would keep the GPU awake for the rest of the session.
     #[cfg(target_os = "android")]
     fn drain_android_picker(&mut self) {
-        let result = crate::android_shim::pick_file_result();
-        if let Some(uri) = result {
-            self.pending_pick.in_flight = false;
-            self.navigate_to_uri(uri);
-        } else if !self.pending_pick.in_flight {
-            // No result and no in-flight picker — nothing to do.
+        let Some(uri) = crate::android_shim::pick_file_result() else {
+            return;
+        };
+        self.pending_pick.in_flight = false;
+        if uri == crate::android_shim::PICKER_CANCELLED {
+            return;
         }
-        // If the picker is still in flight, keep polling.
+        self.navigate_to_uri(uri);
     }
 
     /// Drain any pending intent data URI (delivered via "open with" intents).

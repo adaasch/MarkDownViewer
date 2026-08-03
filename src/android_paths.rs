@@ -27,6 +27,30 @@ pub fn normalize_rel(path: &str) -> String {
     out.join("/")
 }
 
+/// Best-effort display name for a `content://` URI, used when the content
+/// resolver declines to give us the real one.
+///
+/// A SAF document URI ends in a percent-encoded document ID, e.g.
+/// `content://…/document/primary%3ADocs%2Fnotes.md`. Taking the raw last path
+/// segment — which is what the app used to do — puts `primary%3ADocs%2Fnotes.md`
+/// in the title bar. Decode the two separators SAF actually uses and return the
+/// final component.
+pub fn uri_display_name(uri: &str) -> String {
+    let decoded = uri
+        .split('?')
+        .next()
+        .unwrap_or(uri)
+        .replace("%2F", "/")
+        .replace("%2f", "/")
+        .replace("%3A", ":")
+        .replace("%3a", ":");
+    decoded
+        .rsplit(['/', ':'])
+        .find(|s| !s.is_empty())
+        .unwrap_or("(unknown)")
+        .to_string()
+}
+
 /// Whether a path looks like a markdown file (vs. plain text) by extension.
 pub fn is_markdown_path(path: &str) -> bool {
     let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
@@ -67,6 +91,36 @@ mod tests {
         // `..` with nothing to pop is simply ignored.
         assert_eq!(normalize_rel("../x.md"), "x.md");
         assert_eq!(normalize_rel("../../x.md"), "x.md");
+    }
+
+    #[test]
+    fn uri_display_name_decodes_saf_document_id() {
+        assert_eq!(
+            uri_display_name(
+                "content://com.android.externalstorage.documents/document/primary%3ADocs%2Fnotes.md"
+            ),
+            "notes.md"
+        );
+        assert_eq!(
+            uri_display_name(
+                "content://com.android.externalstorage.documents/document/primary%3Areadme.md"
+            ),
+            "readme.md"
+        );
+    }
+
+    #[test]
+    fn uri_display_name_handles_plain_and_lowercase_encoding() {
+        assert_eq!(uri_display_name("file:///sdcard/Docs/a.md"), "a.md");
+        assert_eq!(uri_display_name("content://x/document/p%3aa%2fb.md"), "b.md");
+        // A query string is not part of the name.
+        assert_eq!(uri_display_name("content://x/doc/a.md?v=2"), "a.md");
+    }
+
+    #[test]
+    fn uri_display_name_falls_back_when_empty() {
+        assert_eq!(uri_display_name(""), "(unknown)");
+        assert_eq!(uri_display_name("content://x/dir/"), "dir");
     }
 
     #[test]

@@ -21,6 +21,9 @@ pub use app::MdViewApp;
 pub mod android_shim;
 
 #[cfg(target_os = "android")]
+pub mod android_io;
+
+#[cfg(target_os = "android")]
 use winit::platform::android::activity::AndroidApp;
 
 pub fn create_app_icon() -> eframe::egui::IconData {
@@ -203,19 +206,24 @@ pub fn android_main(android_app: AndroidApp) {
             .with_inner_size([400.0, 800.0])
             .with_min_inner_size([320.0, 480.0])
             .with_icon(std::sync::Arc::new(create_app_icon())),
-        android_app: Some(android_app.clone()),
+        android_app: Some(android_app),
         ..Default::default()
     };
 
     let title = "mdview";
-    let _ = android_app; // moved into android_shim::init above
     if let Err(e) = eframe::run_native(
         title,
         options,
         Box::new(move |cc| {
             configure_fonts_android(&cc.egui_ctx);
-            // Read the launching intent's data URI (if any) on the Java thread
-            // before the renderer spins up so we can show the file right away.
+            // Read the launching intent's URI (if any) before the renderer
+            // spins up so the file is on screen from the first frame.
+            //
+            // `MainActivity.onCreate` deliberately does *not* also queue this
+            // URI for `consume_intent_data`. It used to, which meant the
+            // launching document was read, cached and navigated to twice — once
+            // here and again on frame 1 — leaving a bogus second entry in the
+            // back history.
             let initial_uri = android_shim::intent_data_string();
             let initial_bytes = initial_uri
                 .as_ref()

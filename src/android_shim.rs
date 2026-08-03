@@ -5,12 +5,18 @@
 //! object with static methods that this module calls into via JNI. The
 //! methods cover:
 //!
-//! - `pickFile()` — launch the SAF file picker, return the picked URI as a
-//!   `content://` string.
+//! - `pickFile()` / `pickFileResult()` — launch the SAF file picker and poll
+//!   for the picked URI.
+//! - `pickFolder()` / `pickFolderResult()` — launch the SAF folder picker and
+//!   poll for the granted tree URI.
+//! - `listTreeMarkdown(tree)` — list the readable documents in a granted tree.
+//! - `resolveTreePath(tree, rel)` — resolve a tree-relative path to a document
+//!   URI.
 //! - `openExternal(uri)` — dispatch an `Intent.ACTION_VIEW` for `uri`.
 //! - `readUri(uri)` — read the bytes at `uri` via `ContentResolver`.
-//! - `intentDataString()` — return the activity's launching intent's `data`
-//!   string (the URI the activity was started with), if any.
+//! - `displayName(uri)` — the document's human-readable name.
+//! - `intentDataString()` / `consumeIntentData()` — the URI the activity was
+//!   launched with, and any URI delivered later via `onNewIntent`.
 //! - `filesDir()` — return the activity's `getFilesDir()` absolute path.
 //!
 //! All public functions in this module are no-ops until [`init`] has been
@@ -18,17 +24,26 @@
 
 #![cfg(target_os = "android")]
 
-use std::sync::OnceLock;
-#[cfg(target_os = "android")]
 use android_activity::AndroidApp;
+use std::sync::OnceLock;
+
+/// Sentinel returned by [`pick_file_result`] / [`pick_folder_result`] when the
+/// user dismissed the picker without choosing anything.
+///
+/// A cancelled picker has to be distinguishable from "no answer yet" — both
+/// used to arrive as `None`, so the Rust side could never clear its in-flight
+/// flag and a single cancel left the picker button disabled and a repaint timer
+/// spinning for the rest of the session. The Kotlin side sets this empty string
+/// on cancel; an empty string can never be a real URI.
+pub const PICKER_CANCELLED: &str = "";
 
 /// Fully-qualified Java class name of the Kotlin bridge that the Java side
-/// implements. The class lives in the `com.adaasch.mdview` Kotlin package.
-const BRIDGE_CLASS: &str = "com/adaasch/mdview/RustBridge";
+/// implements. The class lives in the `eu.io_com.mdview` Kotlin package.
+const BRIDGE_CLASS: &str = "eu/io_com/mdview/RustBridge";
 
 /// Binary (dot-separated) form of [`BRIDGE_CLASS`], required by the
 /// class-loader based lookup in [`bridge_class`].
-const BRIDGE_CLASS_BINARY: &str = "com.adaasch.mdview.RustBridge";
+const BRIDGE_CLASS_BINARY: &str = "eu.io_com.mdview.RustBridge";
 
 /// Cached state captured at startup. The JavaVM pointer is valid for the
 /// lifetime of the process.
@@ -89,13 +104,6 @@ pub fn pick_file() -> Option<String> {
 /// - `None` — no result yet, or the bridge is not wired up.
 pub fn pick_file_result() -> Option<String> {
     call_string_method("pickFileResult", &[], "()Ljava/lang/String;")
-}
-
-/// Convenience wrapper around [`pick_file`] that returns `()` — useful when
-/// you only care about whether a file was picked (e.g. when called from a
-/// background thread that will look at the result via a shared slot).
-pub fn pick_file_blocking() -> Option<String> {
-    pick_file()
 }
 
 /// Launch the system folder picker (`ACTION_OPEN_DOCUMENT_TREE`) and return
@@ -170,6 +178,19 @@ pub fn consume_intent_data() -> Option<String> {
 /// Return the activity's `getFilesDir()` absolute path.
 pub fn files_dir() -> Option<String> {
     call_string_method("filesDir", &[], "()Ljava/lang/String;")
+}
+
+/// Ask the content resolver for a document's human-readable display name
+/// (`OpenableColumns.DISPLAY_NAME`). Returns `None` if the provider does not
+/// supply one, in which case the caller should fall back to
+/// [`crate::android_paths::uri_display_name`].
+pub fn display_name(uri: &str) -> Option<String> {
+    call_string_method(
+        "displayName",
+        &[uri],
+        "(Ljava/lang/String;)Ljava/lang/String;",
+    )
+    .filter(|s| !s.is_empty())
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-package com.adaasch.mdview
+package eu.io_com.mdview
 
 import android.app.Activity
 import android.net.Uri
@@ -22,7 +22,18 @@ import java.util.concurrent.atomic.AtomicReference
  */
 object RustBridge {
     private const val TAG = "mdview/RustBridge"
-    private const val CLASS_NAME = "com/adaasch/mdview/RustBridge"
+    private const val CLASS_NAME = "eu/io_com/mdview/RustBridge"
+
+    /**
+     * Sentinel handed to Rust when the user dismissed a picker without
+     * choosing anything. Must match `android_shim::PICKER_CANCELLED`.
+     *
+     * Rust polls the picker result every frame, so "cancelled" and "not
+     * answered yet" have to look different. Reporting both as null left the
+     * Rust side believing a picker was still in flight forever: the toolbar
+     * button stayed disabled and a 200 ms repaint timer kept running.
+     */
+    const val PICKER_CANCELLED = ""
 
     /** The currently active Activity (weak reference to avoid leaks). */
     private var activity: java.lang.ref.WeakReference<MainActivity>? = null
@@ -70,7 +81,7 @@ object RustBridge {
     fun pickFile(mimeType: String): String? {
         val activity = activity?.get() ?: run {
             Log.w(TAG, "pickFile called but no Activity is set")
-            pendingPickResult.set(null)
+            pendingPickResult.set(PICKER_CANCELLED)
             return null
         }
         // Reset pending result before launching.
@@ -81,7 +92,7 @@ object RustBridge {
                 activity.launchFilePicker(mimeType)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to launch file picker: ${e.message}", e)
-                pendingPickResult.set(null)
+                pendingPickResult.set(PICKER_CANCELLED)
             }
         }
         return null
@@ -115,7 +126,7 @@ object RustBridge {
     fun pickFolder(): String? {
         val activity = activity?.get() ?: run {
             Log.w(TAG, "pickFolder called but no Activity is set")
-            pendingFolderResult.set(null)
+            pendingFolderResult.set(PICKER_CANCELLED)
             return null
         }
         pendingFolderResult.set(null)
@@ -124,7 +135,7 @@ object RustBridge {
                 activity.launchFolderPicker()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to launch folder picker: ${e.message}", e)
-                pendingFolderResult.set(null)
+                pendingFolderResult.set(PICKER_CANCELLED)
             }
         }
         return null
@@ -208,6 +219,16 @@ object RustBridge {
     fun filesDir(): String? {
         val activity = activity?.get() ?: return null
         return activity.getFilesDirPath()
+    }
+
+    /**
+     * Called by Rust to get a document's human-readable display name.
+     * Returns null if the provider doesn't supply one, in which case Rust
+     * falls back to deriving a name from the URI itself.
+     */
+    @JvmStatic
+    fun displayName(uriString: String): String? {
+        return activity?.get()?.displayNameImpl(uriString)
     }
 
     /**

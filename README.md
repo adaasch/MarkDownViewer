@@ -79,8 +79,33 @@ ANDROID_HOME=/opt/android-sdk JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 ./gra
 
 # 6. Install on a device
 adb install -r app/build/outputs/apk/release/app-release.apk
-adb shell am start -n com.adaasch.mdview/.MainActivity
+adb shell am start -n eu.io_com.mdview/.MainActivity
 ```
+
+The APK's `versionName`/`versionCode` are derived from `version` in `Cargo.toml`,
+so bumping the crate version is enough to bump the app.
+
+### Signing
+
+`assembleRelease` falls back to the local debug keystore and prints a warning.
+That APK is fine for testing but **not** distributable: the debug key differs
+per machine, and Android refuses to upgrade an app whose signing key changed.
+
+To produce a distributable APK, point the build at a real keystore:
+
+```bash
+export MDVIEW_KEYSTORE=/path/to/release.jks
+export MDVIEW_KEYSTORE_PASSWORD=…
+export MDVIEW_KEY_ALIAS=…
+export MDVIEW_KEY_PASSWORD=…
+./gradlew :app:assembleRelease
+```
+
+CI reads the same key from the repository secrets `ANDROID_KEYSTORE_BASE64`
+(the `.jks` file, base64-encoded), `ANDROID_KEYSTORE_PASSWORD`,
+`ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD`. Until those secrets are set the
+release workflow still builds an APK, but it is debug-signed and the job logs a
+warning saying so.
 
 The app uses `androidx.games:games-activity:4.4.0` to host the eframe/egui
 rendering surface, and the `jni` crate for the small set of JNI calls

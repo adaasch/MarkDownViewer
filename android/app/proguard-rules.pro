@@ -8,7 +8,7 @@
 # are only referenced from Rust via JNI. R8 cannot see JNI references, so it
 # thinks the class is unused and strips it. That breaks the file picker
 # (and every other JNI bridge call) at runtime with a `ClassNotFoundException`
-# when Rust calls `find_class("com/adaasch/mdview/RustBridge")`.
+# when Rust calls `find_class("eu/io_com/mdview/RustBridge")`.
 
 # ---------------------------------------------------------------------------
 # JNI bridge: RustBridge
@@ -36,16 +36,16 @@
 #      `setPendingPickResult`, `setPendingIntentData`) — although these
 #      are inlined into MainActivity by R8, keeping them is harmless and
 #      protects against future R8 inlining decisions.
--keep class com.adaasch.mdview.RustBridge {
+-keep class eu.io_com.mdview.RustBridge {
     public static <fields>;
     private static <fields>;
     public static <methods>;
     private static <methods>;
 }
--keepclassmembers class com.adaasch.mdview.RustBridge {
+-keepclassmembers class eu.io_com.mdview.RustBridge {
     *** Companion;
 }
--keepclasseswithmembernames class com.adaasch.mdview.RustBridge {
+-keepclasseswithmembernames class eu.io_com.mdview.RustBridge {
     native <methods>;
 }
 
@@ -59,7 +59,7 @@
 # called from `RustBridge` and would be stripped if we did not keep them.
 # Keeping the class and all members is safe because MainActivity is
 # already kept by the manifest.
--keep class com.adaasch.mdview.MainActivity {
+-keep class eu.io_com.mdview.MainActivity {
     public <fields>;
     private <fields>;
     public <methods>;
@@ -71,7 +71,7 @@
 # ---------------------------------------------------------------------------
 # This is a defence-in-depth rule in case a future refactor adds another
 # `@JvmStatic` JNI-callable helper class without updating this file.
--keepclassmembers class com.adaasch.mdview.** {
+-keepclassmembers class eu.io_com.mdview.** {
     @android.annotation.Keep public static <methods>;
     @android.annotation.Keep private static <methods>;
     @kotlin.jvm.JvmStatic public static <methods>;
