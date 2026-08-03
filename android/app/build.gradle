@@ -13,6 +13,18 @@ def cargoVersion = {
     matcher[0][1]
 }()
 
+// The ABIs this build targets. Single source of truth: both `abiFilters` (what
+// gets packaged) and `copyJniLibs` (what must exist) read it, so the two can
+// never disagree and demand a library the build was never asked to produce.
+//
+// Override for a fast single-ABI build — a CI compile check or a local run on
+// one device — matching the `cargo ndk -t` flags used to build the libraries:
+//     ./gradlew :app:assembleDebug -Pmdview.abis=arm64-v8a
+def targetAbis = (project.findProperty('mdview.abis')
+        ?: 'arm64-v8a,armeabi-v7a,x86_64,x86')
+    .split(',')*.trim()
+    .findAll { it }
+
 // versionCode must increase monotonically for Play/`adb install -r` upgrades.
 // MAJOR*10000 + MINOR*100 + PATCH keeps that true for any 0-99 component.
 def cargoVersionCode = {
@@ -31,7 +43,8 @@ android {
         versionCode cargoVersionCode
         versionName cargoVersion
         ndk {
-            abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'
+            abiFilters.clear()
+            abiFilters.addAll(targetAbis)
         }
         externalNativeBuild {
             cmake {
@@ -123,7 +136,7 @@ android {
 // configured but before the APK is packaged.
 afterEvaluate {
     def cargoNdkOut = file('build/intermediates/cargo-ndk-out')
-    def abiList = ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86']
+    def abiList = targetAbis
     def copyJniLibs = tasks.register('copyJniLibs') {
         description = 'Copy cargo-ndk output to jniLibs directory'
         group = 'build'

@@ -101,4 +101,7 @@ jobs:
           cd android
           # Debug variant: assembleRelease needs a signing key to be meaningful
           # and runs R8, neither of which this check needs.
-          ./gradlew :app:assembleDebug
+          #
+          # -Pmdview.abis must match the `cargo ndk -t` flags above, or
+          # copyJniLibs rightly fails over the libraries that were never built.
+          ./gradlew :app:assembleDebug -Pmdview.abis=arm64-v8a
