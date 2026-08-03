@@ -84,10 +84,11 @@ jobs:
         uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: '11076708'
-          packages: |
-            platforms;android-34
-            build-tools;34.0.0
-            ndk;26.3.11579264
+          # Space-separated on one line. This action passes the value straight
+          # through to sdkmanager, so a YAML block scalar arrives as a single
+          # argument with newlines in it and fails with
+          # "Failed to find package 'platforms;android-34\nbuild-tools;34.0.0...'".
+          packages: 'platforms;android-34 build-tools;34.0.0 ndk;26.3.11579264'
 
       - name: Build native library
         run: |
