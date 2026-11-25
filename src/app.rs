@@ -9,7 +9,9 @@ use std::path::PathBuf;
 enum PendingNavigation {
     Back,
     Forward,
-    Markdown(PathBuf),
+    /// Navigate to a markdown file, optionally scrolling to a `#fragment`
+    /// anchor from the link URL once it is loaded.
+    Markdown(PathBuf, Option<String>),
     PlainText(PathBuf),
 }
 
@@ -138,7 +140,7 @@ impl MdViewApp {
         let mut elements = Vec::new();
         let mut error: Option<String> = None;
         let navigation: NavigationHistory;
-        let is_plain_text = false;
+        let mut is_plain_text = false;
 
         let placeholder_path = PathBuf::from("(no file)");
 
@@ -152,6 +154,11 @@ impl MdViewApp {
             if let Some(bytes) = bytes {
                 let display_name = crate::android_shim::display_name(&uri)
                     .unwrap_or_else(|| crate::android_paths::uri_display_name(&uri));
+                // A `.txt` arriving via "open with" or a share used to be
+                // force-parsed as markdown on the very first open too — same
+                // bug as `navigate_to_uri` had for picked files. (Computed
+                // before `display_name` is moved into the fake path.)
+                is_plain_text = !crate::android_paths::is_markdown_path(&display_name);
                 let fake_path = PathBuf::from(display_name);
                 match String::from_utf8(bytes) {
                     Ok(text) => {
@@ -162,7 +169,7 @@ impl MdViewApp {
                         error = Some(format!("File is not valid UTF-8: {e}"));
                     }
                 }
-                navigation = NavigationHistory::new(fake_path, false);
+                navigation = NavigationHistory::new(fake_path, is_plain_text);
             } else {
                 error = Some(format!(
                     "Could not read file from URI: {uri}. Use the Open button to pick a file."
@@ -277,7 +284,14 @@ impl MdViewApp {
             .chars()
             .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
             .collect();
-        let cache_name = format!("mdview-{safe_name}");
+        // The URI is hashed into the cache name: two documents with the same
+        // display name from different folders (`Docs/readme.md`,
+        // `Downloads/readme.md`) would otherwise overwrite each other, and
+        // navigating back to the first would silently show the second.
+        let cache_name = format!(
+            "mdview-{safe_name}-{:016x}",
+            crate::highlight::hash_str(&uri)
+        );
         let cache_dir = crate::android_shim::files_dir()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("/data/data/eu.io_com.mdview/files"));
@@ -287,9 +301,12 @@ impl MdViewApp {
             self.error = Some(format!("Could not cache file: {e}"));
             return;
         }
-        self.is_plain_text = false;
+        // Respect the file's actual type, matching what the folder-browser
+        // path does: a `.txt` picked here used to be force-parsed as markdown.
+        let is_plain_text = !crate::android_paths::is_markdown_path(&display_name);
+        self.is_plain_text = is_plain_text;
         self.navigation
-            .navigate_to(cache_path, egui::Vec2::ZERO, false);
+            .navigate_to(cache_path, egui::Vec2::ZERO, is_plain_text);
         self.reload_and_rewatch();
     }
 
@@ -767,8 +784,8 @@ impl eframe::App for MdViewApp {
                         .render(ui, &self.elements, &self.theme, &base_dir);
                     for action in actions.drain(..) {
                         match action {
-                            RenderAction::NavigateMarkdown(path) => {
-                                pending_navigation = Some(PendingNavigation::Markdown(path));
+                            RenderAction::NavigateMarkdown(path, anchor) => {
+                                pending_navigation = Some(PendingNavigation::Markdown(path, anchor));
                             }
                             RenderAction::NavigateTextFile(path) => {
                                 pending_navigation = Some(PendingNavigation::PlainText(path));
@@ -801,8 +818,15 @@ impl eframe::App for MdViewApp {
                         self.reload_and_rewatch();
                     }
                 }
-                PendingNavigation::Markdown(path) => {
+                PendingNavigation::Markdown(path, anchor) => {
                     self.navigate_to(path, false);
+                    // Applied after the file is loaded: the next frame's
+                    // heading render checks `scroll_target` and scrolls to the
+                    // matching anchor. An anchor that matches no heading is
+                    // simply never consumed, same as a stale TOC selection.
+                    if let Some(anchor) = anchor {
+                        self.renderer.scroll_target = Some(anchor);
+                    }
                 }
                 PendingNavigation::PlainText(path) => {
                     self.navigate_to(path, true);

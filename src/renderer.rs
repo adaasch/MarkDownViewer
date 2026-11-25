@@ -39,7 +39,9 @@ struct InlineStyleState {
 /// Return value from rendering — tells the app what action to take
 #[derive(Debug, Clone)]
 pub enum RenderAction {
-    NavigateMarkdown(std::path::PathBuf),
+    /// Navigate to a markdown file. The second field is an optional
+    /// `#fragment` from the link URL, to scroll to after the file loads.
+    NavigateMarkdown(std::path::PathBuf, Option<String>),
     NavigateTextFile(std::path::PathBuf),
     OpenExternal(String),
     ScrollToAnchor(String),
@@ -877,8 +879,8 @@ impl MdRenderer {
                 let response = ui.link(rt);
                 if response.clicked() {
                     match classify_link(url, base_dir) {
-                        LinkAction::NavigateMarkdown(path) => {
-                            actions.push(RenderAction::NavigateMarkdown(path));
+                        LinkAction::NavigateMarkdown(path, anchor) => {
+                            actions.push(RenderAction::NavigateMarkdown(path, anchor));
                         }
                         LinkAction::NavigateTextFile(path) => {
                             actions.push(RenderAction::NavigateTextFile(path));
@@ -1108,6 +1110,69 @@ fn parse_named_color(name: &str) -> Option<Color32> {
     }
 }
 
+#[cfg(test)]
+mod color_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_hex_color_six_digits() {
+        assert_eq!(parse_hex_color("#ff0000"), Some(Color32::from_rgb(255, 0, 0)));
+        assert_eq!(parse_hex_color("#00FF00"), Some(Color32::from_rgb(0, 255, 0)));
+        assert_eq!(parse_hex_color("#336699"), Some(Color32::from_rgb(0x33, 0x66, 0x99)));
+    }
+
+    #[test]
+    fn test_parse_hex_color_three_digits() {
+        assert_eq!(parse_hex_color("#f00"), Some(Color32::from_rgb(255, 0, 0)));
+        assert_eq!(parse_hex_color("#0F0"), Some(Color32::from_rgb(0, 255, 0)));
+        assert_eq!(parse_hex_color("#123"), Some(Color32::from_rgb(0x11, 0x22, 0x33)));
+    }
+
+    #[test]
+    fn test_parse_hex_color_rejects_garbage() {
+        assert_eq!(parse_hex_color("#ff00"), None);
+        assert_eq!(parse_hex_color("#fffff"), None);
+        assert_eq!(parse_hex_color("#gggggg"), None);
+        assert_eq!(parse_hex_color("red"), None);
+        assert_eq!(parse_hex_color(""), None);
+    }
+
+    #[test]
+    fn test_parse_html_color_handles_hex() {
+        // `<span style="color:#ff8800">` used to silently render in the normal
+        // text color because only six named colors were understood.
+        assert_eq!(
+            parse_html_color(r#"<span style="color:#ff8800">x</span>"#),
+            Some(Color32::from_rgb(255, 136, 0))
+        );
+        // Named colors still take priority when both would match.
+        assert_eq!(
+            parse_html_color(r#"<span style="color: red">x</span>"#),
+            Some(Color32::from_rgb(220, 60, 60))
+        );
+    }
+}
+
+/// Parse a CSS hex color: `#rgb` or `#rrggbb`, case-insensitive, `#` optional.
+fn parse_hex_color(value: &str) -> Option<Color32> {
+    let hex = value.trim().strip_prefix('#').unwrap_or(value.trim());
+    if hex.len() == 3 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        // Each nibble is duplicated: `f` expands to `ff`.
+        let channels: Vec<u8> = hex
+            .bytes()
+            .map(|b| (b as char).to_digit(16).unwrap() as u8 * 17)
+            .collect();
+        return Some(Color32::from_rgb(channels[0], channels[1], channels[2]));
+    }
+    if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        return Some(Color32::from_rgb(r, g, b));
+    }
+    None
+}
+
 fn parse_html_color(tag: &str) -> Option<Color32> {
     let lower = tag.to_ascii_lowercase();
     let style_pos = lower.find("style=")?;
@@ -1122,7 +1187,8 @@ fn parse_html_color(tag: &str) -> Option<Color32> {
     let end = value
         .find([';', '"', '\'', '>'])
         .unwrap_or(value.len());
-    parse_named_color(&value[..end])
+    let raw = &value[..end];
+    parse_named_color(raw).or_else(|| parse_hex_color(raw))
 }
 
 fn apply_inline_html_style(tag: &str, style: &mut InlineStyleState) -> bool {

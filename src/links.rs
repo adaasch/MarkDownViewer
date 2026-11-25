@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LinkAction {
-    /// Navigate to another markdown file internally
-    NavigateMarkdown(PathBuf),
+    /// Navigate to another markdown file internally. The second field is an
+    /// optional `#fragment` from the URL, to scroll to after the file loads.
+    NavigateMarkdown(PathBuf, Option<String>),
     /// Navigate to a plain text file
     NavigateTextFile(PathBuf),
     /// Scroll to a heading anchor in the current document
@@ -46,8 +47,8 @@ pub fn classify_link(url: &str, base_dir: &Path) -> LinkAction {
     }
 
     // Local path — strip fragment
-    let (path_part, _fragment) = match url.split_once('#') {
-        Some((p, f)) => (p, Some(f)),
+    let (path_part, fragment) = match url.split_once('#') {
+        Some((p, f)) => (p, Some(f.to_string())),
         None => (url, None),
     };
 
@@ -61,15 +62,20 @@ pub fn classify_link(url: &str, base_dir: &Path) -> LinkAction {
     if let Some(ext) = resolved.extension() {
         let ext_lower = ext.to_string_lossy().to_lowercase();
         if MARKDOWN_EXTENSIONS.iter().any(|e| *e == ext_lower) {
-            return LinkAction::NavigateMarkdown(resolved);
+            return LinkAction::NavigateMarkdown(resolved, fragment);
         }
         if TEXT_EXTENSIONS.iter().any(|e| *e == ext_lower) {
             return LinkAction::NavigateTextFile(resolved);
         }
     }
 
-    // Everything else (including local images, PDFs, etc.) → open externally
-    LinkAction::OpenExternal(url.to_string())
+    // Everything else (including local images, PDFs, etc.) → open externally.
+    // Hand the *resolved* path to the OS, not the raw URL: `open::that` and
+    // Android's `ACTION_VIEW` resolve relative paths against the process's
+    // working directory, not against the document the link was clicked in, so
+    // a bare `report.pdf` only worked when the viewer happened to be launched
+    // from the document's directory.
+    LinkAction::OpenExternal(resolved.to_string_lossy().into_owned())
 }
 
 /// Generate an anchor ID from heading text (GitHub-style).
@@ -120,7 +126,10 @@ mod tests {
     #[test]
     fn test_relative_md_link() {
         let action = classify_link("other.md", Path::new("/docs"));
-        assert_eq!(action, LinkAction::NavigateMarkdown(PathBuf::from("/docs/other.md")));
+        assert_eq!(
+            action,
+            LinkAction::NavigateMarkdown(PathBuf::from("/docs/other.md"), None)
+        );
     }
 
     #[test]
@@ -128,7 +137,7 @@ mod tests {
         let action = classify_link("subdir/notes.md", Path::new("/docs"));
         assert_eq!(
             action,
-            LinkAction::NavigateMarkdown(PathBuf::from("/docs/subdir/notes.md"))
+            LinkAction::NavigateMarkdown(PathBuf::from("/docs/subdir/notes.md"), None)
         );
     }
 
@@ -137,7 +146,22 @@ mod tests {
         let action = classify_link("/home/user/file.md", Path::new("/docs"));
         assert_eq!(
             action,
-            LinkAction::NavigateMarkdown(PathBuf::from("/home/user/file.md"))
+            LinkAction::NavigateMarkdown(PathBuf::from("/home/user/file.md"), None)
+        );
+    }
+
+    #[test]
+    fn test_md_link_with_fragment_keeps_anchor() {
+        // The fragment used to be split off and discarded, so a link to
+        // `other.md#intro` landed at the top of other.md instead of the intro
+        // section.
+        let action = classify_link("other.md#intro", Path::new("/docs"));
+        assert_eq!(
+            action,
+            LinkAction::NavigateMarkdown(
+                PathBuf::from("/docs/other.md"),
+                Some("intro".to_string())
+            )
         );
     }
 
@@ -147,7 +171,7 @@ mod tests {
             let url = format!("file.{ext}");
             let action = classify_link(&url, Path::new("/docs"));
             assert!(
-                matches!(action, LinkAction::NavigateMarkdown(_)),
+                matches!(action, LinkAction::NavigateMarkdown(..)),
                 "Expected NavigateMarkdown for .{ext}"
             );
         }
@@ -166,9 +190,24 @@ mod tests {
     }
 
     #[test]
-    fn test_non_md_local_file_opens_external() {
+    fn test_non_md_local_file_opens_external_with_resolved_path() {
+        // The OS opens paths relative to the *process* working directory, not
+        // the document the link was clicked in, so the resolved path — not the
+        // raw URL — has to be handed over.
         let action = classify_link("document.pdf", Path::new("/docs"));
-        assert_eq!(action, LinkAction::OpenExternal("document.pdf".to_string()));
+        assert_eq!(
+            action,
+            LinkAction::OpenExternal("/docs/document.pdf".to_string())
+        );
+    }
+
+    #[test]
+    fn test_local_file_link_with_fragment_resolves_without_fragment() {
+        let action = classify_link("report.pdf#page=2", Path::new("/docs"));
+        assert_eq!(
+            action,
+            LinkAction::OpenExternal("/docs/report.pdf".to_string())
+        );
     }
 
     #[test]
